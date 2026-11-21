@@ -192,14 +192,14 @@ function SetupScreen() {
       <div className="setup-card">
         <div className="brand-mark large"><BookOpen size={28} /></div>
         <h1>Classwork needs configuration</h1>
-        <p>Connect this workspace to Supabase before authentication, uploads or PDFs can operate.</p>
+        <p>This deployment is missing its public Supabase configuration. Authentication, uploads and PDFs are unavailable until it is set.</p>
         <ol>
-          <li>Create a Supabase project.</li>
-          <li>Run <code>supabase/migrations/001_classwork.sql</code> in the SQL editor.</li>
-          <li>Create <code>.env.local</code> using <code>.env.example</code>.</li>
-          <li>Restart the Vite server and create the owner account.</li>
+          <li>In Vercel, open <strong>Project Settings → Environment Variables</strong>.</li>
+          <li>Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> for Production.</li>
+          <li>Redeploy after saving the variables. For local development, set them in <code>.env.local</code> and restart Vite.</li>
+          <li>Confirm the database migration and class setup in the Supabase project.</li>
         </ol>
-        <div className="setup-callout"><ShieldCheck size={18} /><span>The owner must be set explicitly in <code>students.is_owner</code>. Never expose a service-role key.</span></div>
+        <div className="setup-callout"><ShieldCheck size={18} /><span>Use only the Supabase publishable key in frontend variables. Never add a service-role key to Vercel frontend settings.</span></div>
       </div>
     </div>
   )
