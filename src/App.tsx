@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   Archive, Bell, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight,
@@ -22,7 +22,7 @@ const subjects = [
 ]
 
 type PageName = 'Dashboard' | 'Daily Work' | 'Upload Work' | 'Digital Notebook' |
-  'All Submissions' | 'My Contributions' | 'Admin Panel' | 'Settings'
+  'All Submissions' | 'My Contributions' | 'Admin Panel' | 'Member Approvals' | 'Settings'
 
 type TaskRow = {
   id: string
@@ -50,6 +50,7 @@ const navItems: { label: PageName; icon: typeof Home }[] = [
   { label: 'All Submissions', icon: FolderOpen },
   { label: 'My Contributions', icon: FileText },
   { label: 'Admin Panel', icon: ShieldCheck },
+  { label: 'Member Approvals', icon: Users },
   { label: 'Settings', icon: Settings },
 ]
 
@@ -78,6 +79,41 @@ function App() {
   const [student, setStudent] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [pendingCount, setPendingCount] = useState(0)
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [profileRefreshVersion, setProfileRefreshVersion] = useState(0)
+
+  const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
+    setToast({ text, type })
+    window.setTimeout(() => setToast(null), 3500)
+  }, [])
+  const userId = session?.user.id
+
+  const loadData = useCallback(async () => {
+    const client = supabase
+    if (!client || !userId) return
+    setLoading(true)
+    try {
+      const { data: profile, error: profileError } = await client
+        .from('students').select('*').eq('id', userId).maybeSingle()
+      if (profileError) throw profileError
+      setStudent(profile)
+      if (profile?.status === 'approved') {
+        const { data, error } = await client.from('tasks')
+          .select('id,title,academic_date,status,chapter,exercise,subjects(name)')
+          .eq('academic_date', selectedDate)
+          .order('created_at', { ascending: false })
+        if (error) throw error
+        setTasks((data as unknown as TaskRow[]) || [])
+      } else {
+        setTasks([])
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load your class profile.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [userId, selectedDate, showToast])
 
   useEffect(() => {
     if (!supabase) return
@@ -89,50 +125,87 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!supabase || !session) return
-    loadData()
-  }, [session, selectedDate])
-
-  async function loadData() {
-    setLoading(true)
-    const { data: profile } = await supabase!.from('students').select('*').eq('id', session!.user.id).maybeSingle()
-    setStudent(profile)
-    if (profile?.status === 'approved') {
-      const { data } = await supabase!.from('tasks')
-        .select('id,title,academic_date,status,chapter,exercise,subjects(name)')
-        .eq('academic_date', selectedDate)
-        .order('created_at', { ascending: false })
-      setTasks((data as unknown as TaskRow[]) || [])
-    }
-    setLoading(false)
-  }
-
-  function showToast(text: string, type: 'success' | 'error' = 'success') {
-    setToast({ text, type })
-    window.setTimeout(() => setToast(null), 3500)
-  }
+    void loadData()
+  }, [loadData, profileRefreshVersion])
 
   async function signOut() {
     await supabase?.auth.signOut()
     setSession(null)
+    setStudent(null)
+    setPendingCount(0)
   }
+
+  const navigate = (next: PageName) => {
+    setPage(next)
+    setMobileMenu(false)
+    setNotificationsOpen(false)
+  }
+
+  const isOwner = student?.is_owner
+  const classId = student?.class_id
+  const studentId = student?.id
+  const studentStatus = student?.status
+  const refreshPendingCount = useCallback(async () => {
+    if (!supabase || !isOwner) return
+    try {
+      let query = supabase.from('students').select('id', { count: 'exact', head: true }).eq('status', 'pending')
+      if (classId) query = query.eq('class_id', classId)
+      const { count, error } = await query
+      if (error) throw error
+      setPendingCount(count || 0)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not refresh member requests.', 'error')
+    }
+  }, [classId, isOwner, showToast])
+
+  useEffect(() => {
+    const client = supabase
+    if (!client || !userId || !studentId) return
+    const profileChannel = client.channel(`student-profile-${userId}`)
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'students', filter: `id=eq.${userId}`
+      }, () => { void loadData() })
+      .subscribe()
+
+    let ownerChannel: ReturnType<typeof client.channel> | undefined
+    if (isOwner) {
+      ownerChannel = client.channel(`owner-member-requests-${userId}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, payload => {
+          if (payload.eventType === 'INSERT' && payload.new.status === 'pending') {
+            showToast(`New member request: ${payload.new.display_name}`)
+          }
+          void refreshPendingCount()
+        })
+        .subscribe()
+    }
+
+    const refreshTimer = window.setInterval(() => {
+      if (isOwner) void refreshPendingCount()
+      else if (studentStatus === 'pending') void loadData()
+    }, 15000)
+
+    return () => {
+      window.clearInterval(refreshTimer)
+      void client.removeChannel(profileChannel)
+      if (ownerChannel) void client.removeChannel(ownerChannel)
+    }
+  }, [userId, studentId, isOwner, studentStatus, loadData, refreshPendingCount, showToast])
+
+  useEffect(() => {
+    if (isOwner) void refreshPendingCount()
+  }, [isOwner, refreshPendingCount, studentId])
 
   if (!isSupabaseConfigured) {
     return <SetupScreen />
   }
   if (!session) {
-    return <AuthScreen mode={authMode} setMode={setAuthMode} loading={authLoading} setLoading={setAuthLoading} showToast={showToast} />
+    return <AuthScreen mode={authMode} setMode={setAuthMode} loading={authLoading} setLoading={setAuthLoading} showToast={showToast} onJoined={() => setProfileRefreshVersion(value => value + 1)} />
   }
   if (session && !student) {
     return <JoinScreen session={session} onJoined={loadData} showToast={showToast} onLogout={signOut} />
   }
   if (student && student.status === 'pending') {
     return <PendingScreen student={student} onLogout={signOut} />
-  }
-
-  const navigate = (next: PageName) => {
-    setPage(next)
-    setMobileMenu(false)
   }
 
   return (
@@ -146,7 +219,7 @@ function App() {
         </div>
         <nav className="main-nav" aria-label="Main navigation">
           {navItems.map(item => {
-            if (item.label === 'Admin Panel' && !student?.is_owner) return null
+            if ((item.label === 'Admin Panel' || item.label === 'Member Approvals') && !student?.is_owner) return null
             const Icon = item.icon
             return (
               <button key={item.label} className={page === item.label ? 'active' : ''} onClick={() => navigate(item.label)}>
@@ -170,17 +243,35 @@ function App() {
             <label><CalendarDays size={16} /><input type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} /></label>
             <button aria-label="Next date" onClick={() => changeDate(selectedDate, 1, setSelectedDate)}><ChevronRight size={17} /></button>
           </div>
-          <button className="icon-button notification" aria-label="Notifications"><Bell size={19} /><i /></button>
+          <div className="notification-wrap">
+            <button
+              className="icon-button notification"
+              aria-label={`Notifications${pendingCount ? `, ${pendingCount} pending member requests` : ''}`}
+              aria-expanded={notificationsOpen}
+              aria-controls="notification-panel"
+              onClick={() => setNotificationsOpen(open => !open)}
+            >
+              <Bell size={19} />{pendingCount > 0 && <span className="notification-count">{pendingCount > 99 ? '99+' : pendingCount}</span>}
+            </button>
+            {notificationsOpen && (
+              <section className="notification-panel" id="notification-panel" aria-label="Notifications">
+                <strong>Member requests</strong>
+                <p>{pendingCount ? `${pendingCount} new member request${pendingCount === 1 ? '' : 's'} need your review.` : 'You’re all caught up.'}</p>
+                {student?.is_owner && <button className="text-button" onClick={() => navigate('Member Approvals')}>Review requests</button>}
+              </section>
+            )}
+          </div>
         </header>
 
         {loading ? <Loading /> :
           page === 'Dashboard' ? <Dashboard date={selectedDate} tasks={tasks} navigate={navigate} /> :
           page === 'Upload Work' ? <UploadWork student={student} date={selectedDate} showToast={showToast} onComplete={loadData} /> :
           page === 'Digital Notebook' ? <Notebook /> :
-          page === 'Daily Work' ? <DailyWork date={selectedDate} tasks={tasks} /> :
+          page === 'Daily Work' ? <DailyWork date={selectedDate} tasks={tasks} navigate={navigate} /> :
           page === 'All Submissions' ? <SubmissionsView /> :
           page === 'My Contributions' ? <Contributions student={student} /> :
-          page === 'Admin Panel' && student?.is_owner ? <AdminPanel /> :
+          page === 'Admin Panel' && student?.is_owner ? <AdminPanel navigate={navigate} pendingCount={pendingCount} /> :
+          page === 'Member Approvals' && student?.is_owner ? <MemberApprovals showToast={showToast} /> :
           page === 'Settings' ? <SettingsView student={student} /> :
           <Dashboard date={selectedDate} tasks={tasks} navigate={navigate} />}
       </main>
@@ -214,7 +305,7 @@ function SetupScreen() {
   )
 }
 
-function AuthScreen({ mode, setMode, loading, setLoading, showToast }: any) {
+function AuthScreen({ mode, setMode, loading, setLoading, showToast, onJoined }: any) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
@@ -235,7 +326,10 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: any) {
           invite_code: invite, student_name: name, student_roll: roll
         })
         if (joinError) showToast(joinError.message, 'error')
-        else showToast('Registration submitted for owner approval.')
+        else {
+          showToast('Registration submitted for owner approval.')
+          onJoined?.()
+        }
       } else if (data.user) {
         showToast('Account created. Confirm the email, then sign in and join the class.')
       }
@@ -278,7 +372,7 @@ function PendingScreen({ student, onLogout }: any) {
       <div className="pending-card">
         <div className="brand-mark large"><ShieldCheck size={28} /></div>
         <h1>Approval pending</h1>
-        <p>Hi {student.display_name}. Your joining request is waiting for the platform owner to approve your account.</p>
+        <p>Hi {student.display_name}. Your joining request is waiting for the platform owner to approve your account. This page will update automatically when it is approved.</p>
         <button className="secondary-button" onClick={onLogout}>Sign out</button>
       </div>
     </div>
@@ -662,7 +756,7 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
   )
 }
 
-function DailyWork({ date, tasks }: { date: string; tasks: TaskRow[] }) {
+function DailyWork({ date, tasks, navigate }: { date: string; tasks: TaskRow[]; navigate: (page: PageName) => void }) {
   async function downloadDailyPdf() {
     const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' })
     pdf.setFont('helvetica', 'bold'); pdf.setFontSize(22); pdf.text('Class 5 · Daily Work', 105, 35, { align: 'center' })
@@ -689,7 +783,7 @@ function DailyWork({ date, tasks }: { date: string; tasks: TaskRow[] }) {
         return (
           <section className="daily-section" key={subject.name}>
             <div className="daily-heading"><div className="subject-icon" style={{ background: `${subject.color}16`, color: subject.color }}>{subject.short}</div><h2>{subject.name}</h2></div>
-            {subjectTasks.map(task => <div className="task-card" key={task.id}><div><strong>{task.title}</strong><span>{task.chapter || 'No chapter'} · {task.status.replaceAll('_', ' ')}</span></div><button className="icon-button"><ChevronRight size={18} /></button></div>)}
+            {subjectTasks.map(task => <div className="task-card" key={task.id}><div><strong>{task.title}</strong><span>{task.chapter || 'No chapter'} · {task.status.replaceAll('_', ' ')}</span></div><button className="icon-button" aria-label={`Open ${task.title}`} onClick={() => navigate('Digital Notebook')}><ChevronRight size={18} /></button></div>)}
           </section>
         )
       })}
@@ -757,22 +851,141 @@ function Contributions({ student }: any) {
   )
 }
 
-function AdminPanel() {
+function AdminPanel({ navigate, pendingCount }: { navigate: (page: PageName) => void; pendingCount: number }) {
   return (
     <div className="page">
       <div className="page-heading"><div><p className="eyebrow">OWNER ONLY</p><h1>Admin panel</h1></div></div>
       <div className="admin-grid">
-        {[
-          ['Student approvals', Users, '0 pending'],
-          ['Manage subjects', Grid2X2, '6 subjects'],
-          ['Task & submission review', FolderOpen, 'Needs review'],
-          ['PDF publishing', FileText, 'Versioned archive'],
-          ['Reports', AlertTriangle, '0 open'],
-          ['Audit history', Clock3, 'Owner activity'],
-        ].map(([title, Icon, subtitle]: any) => (
-          <button className="admin-card" key={title}><div className="admin-icon"><Icon size={21} /></div><div><strong>{title}</strong><span>{subtitle}</span></div><ChevronRight size={18} /></button>
-        ))}
+        <button className="admin-card" onClick={() => navigate('Member Approvals')}>
+          <div className="admin-icon"><Users size={21} /></div>
+          <div><strong>Student approvals</strong><span>{pendingCount} pending request{pendingCount === 1 ? '' : 's'}</span></div>
+          <ChevronRight size={18} />
+        </button>
+        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div className="admin-icon"><Grid2X2 size={21} /></div>
+          <div><strong>Manage subjects</strong><span>Not available yet</span></div>
+        </div>
+        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div className="admin-icon"><FolderOpen size={21} /></div>
+          <div><strong>Task & submission review</strong><span>Not available yet</span></div>
+        </div>
+        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div className="admin-icon"><FileText size={21} /></div>
+          <div><strong>PDF publishing</strong><span>Not available yet</span></div>
+        </div>
+        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div className="admin-icon"><AlertTriangle size={21} /></div>
+          <div><strong>Reports</strong><span>Not available yet</span></div>
+        </div>
+        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div className="admin-icon"><Clock3 size={21} /></div>
+          <div><strong>Audit history</strong><span>Not available yet</span></div>
+        </div>
       </div>
+    </div>
+  )
+}
+
+type PendingStudent = {
+  id: string
+  display_name: string
+  roll_number: string
+  created_at: string
+}
+
+function MemberApprovals({ showToast }: { showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [requests, setRequests] = useState<PendingStudent[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const loadRequests = useCallback(async () => {
+    const client = supabase
+    if (!client) return
+    try {
+      const { data, error } = await client.from('students')
+        .select('id,display_name,roll_number,created_at')
+        .eq('status', 'pending')
+        .order('created_at', { ascending: true })
+      if (error) throw error
+      setRequests(data || [])
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load member requests.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [showToast])
+
+  useEffect(() => {
+    void loadRequests()
+    const client = supabase
+    if (!client) return
+    const channel = client.channel('member-approval-queue')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => {
+        void loadRequests()
+      })
+      .subscribe()
+    const timer = window.setInterval(() => { void loadRequests() }, 15000)
+    return () => {
+      window.clearInterval(timer)
+      void client.removeChannel(channel)
+    }
+  }, [loadRequests])
+
+  async function updateRequest(request: PendingStudent, status: 'approved' | 'suspended') {
+    const client = supabase
+    if (!client) return
+    setBusyId(request.id)
+    try {
+      const { data, error } = await client.from('students')
+        .update({ status })
+        .eq('id', request.id)
+        .eq('status', 'pending')
+        .select('id')
+        .maybeSingle()
+      if (error) {
+        showToast(error.message, 'error')
+      } else if (!data) {
+        showToast('This request was already handled. Refreshing the list.', 'error')
+      } else {
+        showToast(status === 'approved' ? `${request.display_name} approved.` : `${request.display_name} declined.`)
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not update this member request.', 'error')
+    } finally {
+      setBusyId(null)
+      await loadRequests()
+    }
+  }
+
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><p className="eyebrow">OWNER ONLY</p><h1>Member approvals</h1></div>
+        <button className="secondary-button" onClick={() => { setLoading(true); void loadRequests() }}>Refresh</button>
+      </div>
+      <p className="approval-intro">Review class join requests here. Approved members can sign in and use the notebook immediately.</p>
+      {loading ? <Loading /> : requests.length ? (
+        <div className="approval-list">
+          {requests.map(request => (
+            <article className="approval-card" key={request.id}>
+              <div className="approval-avatar">{request.display_name.slice(0, 1).toUpperCase()}</div>
+              <div className="approval-details">
+                <strong>{request.display_name}</strong>
+                <span>Roll number {request.roll_number}</span>
+                <small>Requested {new Date(request.created_at).toLocaleString()}</small>
+              </div>
+              <div className="approval-actions">
+                <button className="secondary-button" disabled={busyId === request.id} onClick={() => void updateRequest(request, 'suspended')}>Decline</button>
+                <button className="primary-button" disabled={busyId === request.id} onClick={() => void updateRequest(request, 'approved')}>
+                  {busyId === request.id ? 'Saving…' : 'Approve'}
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state"><Users size={34} /><h3>No pending member requests</h3><p>New requests will appear here and update automatically.</p></div>
+      )}
     </div>
   )
 }

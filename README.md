@@ -5,7 +5,7 @@ A private Class 5 digital notebook built with React, TypeScript, Tailwind CSS, S
 ## Supabase setup
 
 1. Create a Supabase project.
-2. In the Supabase SQL editor, run `supabase/migrations/001_classwork.sql` for a new project. For an existing installation, also run each newer migration in order, including `002_submission_upload_policies.sql`.
+2. In the Supabase SQL editor, run `supabase/migrations/001_classwork.sql` for a new project. For an existing installation, also run each newer migration in order, including `002_submission_upload_policies.sql` and `003_member_approval_realtime.sql`.
 3. In **Authentication**, enable Email/password sign-in.
 4. Create `.env.local` from `.env.example` and set:
 
@@ -34,6 +34,12 @@ where id = 'OWNER_AUTH_USER_UUID';
 ```
 
 Never expose the Supabase service-role key in frontend code or Vite variables.
+
+## Approving members
+
+Sign in using the owner account, open **Admin Panel → Student approvals** (or **Member Approvals** in the sidebar), then choose **Approve** or **Decline**. New requests update the notification bell in real time; the app also refreshes the queue every 15 seconds as a fallback. Once approved, the student's pending screen refreshes automatically.
+
+Email alerts to the owner are not configured yet. In-app notifications work without exposing an email credential in the browser; choose a trusted server-side email provider before enabling Gmail delivery.
 
 ## Run locally
 
