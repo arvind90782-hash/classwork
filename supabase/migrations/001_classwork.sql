@@ -165,8 +165,6 @@ create policy "student reads approved peers" on public.students for select
   using (id=auth.uid() or (public.is_owner()) or exists (
     select 1 from public.students viewer where viewer.id=auth.uid() and viewer.class_id=students.class_id and viewer.status='approved'
   ));
-create policy "student inserts own profile" on public.students for insert with check (id=auth.uid());
-create policy "student updates own identity" on public.students for update using (id=auth.uid()) with check (id=auth.uid());
 create policy "owner updates students" on public.students for update using (public.is_owner()) with check (public.is_owner());
 
 create policy "approved read subjects" on public.subjects for select
@@ -273,6 +271,7 @@ create policy "approved users read notebook objects" on storage.objects for sele
       where p.storage_path=storage.objects.name
         and s.id=auth.uid()
         and s.status='approved'
+        and (not sb.is_hidden or public.is_owner())
     )
   );
 
@@ -280,8 +279,16 @@ create policy "approved users upload notebook objects" on storage.objects for in
   with check (
     bucket_id='classwork-pages'
     and exists (
-      select 1 from public.students s
-      where s.id=auth.uid() and s.status='approved'
+      select 1
+      from public.submissions sb
+      join public.tasks t on t.id=sb.task_id
+      join public.students s on s.id=sb.contributor_id
+      where s.id=auth.uid()
+        and s.status='approved'
+        and t.class_id=s.class_id
+        and split_part(storage.objects.name, '/', 1)=s.class_id::text
+        and split_part(storage.objects.name, '/', 2)=t.id::text
+        and split_part(storage.objects.name, '/', 3)=sb.id::text
     )
   );
 

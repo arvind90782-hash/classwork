@@ -5,7 +5,7 @@ A private Class 5 digital notebook built with React, TypeScript, Tailwind CSS, S
 ## Supabase setup
 
 1. Create a Supabase project.
-2. In the Supabase SQL editor, run `supabase/migrations/001_classwork.sql`.
+2. In the Supabase SQL editor, run `supabase/migrations/001_classwork.sql` for a new project. For an existing installation, also run each newer migration in order, including `002_submission_upload_policies.sql`.
 3. In **Authentication**, enable Email/password sign-in.
 4. Create `.env.local` from `.env.example` and set:
 
