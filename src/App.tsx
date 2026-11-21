@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
-  Archive, Bell, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight,
+  Archive, Bell, BookOpen, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
   Clock3, Download, FileText, FolderOpen, Grid2X2, Home, ImagePlus,
   LogOut, Menu, RotateCw, Search, Settings, ShieldCheck, Upload,
   UserRound, Users, X, AlertTriangle
@@ -9,8 +9,8 @@ import {
 import { jsPDF } from 'jspdf'
 import imageCompression from 'browser-image-compression'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
-import { createPagesPdfBlob, downloadPagesPdf, fetchCuratedPages, fetchPdfArchives, fetchWorkSubmissions } from './lib/work'
-import type { CuratedPage, PdfArchive, WorkSubmission } from './lib/work'
+import { createPagesPdfBlob, downloadPagesPdf, fetchClassDocuments, fetchCuratedPages, fetchPdfArchives, fetchWorkSubmissions } from './lib/work'
+import type { ClassDocument, CuratedPage, PdfArchive, WorkSubmission } from './lib/work'
 import './App.css'
 import './upload.css'
 
@@ -25,7 +25,7 @@ const subjects = [
 
 type PageName = 'Dashboard' | 'Daily Work' | 'Upload Work' | 'Digital Notebook' |
   'All Submissions' | 'My Contributions' | 'Admin Panel' | 'Member Approvals' |
-  'Manage Subjects' | 'Reports' | 'Audit History' | 'Settings'
+  'Manage Subjects' | 'Reports' | 'Audit History' | 'Class Pages' | 'Settings'
 
 type TaskRow = {
   id: string
@@ -44,12 +44,17 @@ type UploadBatch = {
   pathByFileId: Record<string, string>
   completedFileIds: string[]
 }
+type ClassDocumentBatch = {
+  documentId: string
+  completedFileIds: string[]
+}
 
 const navItems: { label: PageName; icon: typeof Home }[] = [
   { label: 'Dashboard', icon: Home },
   { label: 'Daily Work', icon: CalendarDays },
   { label: 'Upload Work', icon: Upload },
   { label: 'Digital Notebook', icon: BookOpen },
+  { label: 'Class Pages', icon: Archive },
   { label: 'All Submissions', icon: FolderOpen },
   { label: 'My Contributions', icon: FileText },
   { label: 'Admin Panel', icon: ShieldCheck },
@@ -285,6 +290,7 @@ function App() {
         {loading ? <Loading /> :
           page === 'Dashboard' ? <Dashboard date={selectedDate} tasks={tasks} navigate={navigate} student={student} showToast={showToast} /> :
           page === 'Upload Work' ? <UploadWork student={student} date={selectedDate} showToast={showToast} onComplete={loadData} /> :
+          page === 'Class Pages' ? <ClassPages student={student} showToast={showToast} /> :
           page === 'Digital Notebook' ? <Notebook showToast={showToast} student={student} /> :
           page === 'Daily Work' ? <DailyWork date={selectedDate} tasks={tasks} navigate={navigate} /> :
           page === 'All Submissions' ? <SubmissionsView student={student} showToast={showToast} /> :
@@ -545,8 +551,10 @@ function Dashboard({ date, tasks, navigate, student, showToast }: {
 }
 
 function UploadWork({ student, date, showToast, onComplete }: any) {
-  const [subject, setSubject] = useState(subjects[0].name)
-  const [availableSubjects, setAvailableSubjects] = useState<string[]>([])
+  const [subjectId, setSubjectId] = useState('')
+  const [availableSubjects, setAvailableSubjects] = useState<Array<{ id: string; name: string }>>([])
+  const [subjectsLoading, setSubjectsLoading] = useState(true)
+  const [subjectError, setSubjectError] = useState('')
   const [taskTitle, setTaskTitle] = useState('')
   const [chapter, setChapter] = useState('')
   const [exercise, setExercise] = useState('')
@@ -572,27 +580,37 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
     objectUrls.current.clear()
   }, [])
 
-  useEffect(() => {
-    let active = true
-    async function loadSubjects() {
-      if (!supabase || !student?.class_id) return
+  const loadSubjects = useCallback(async () => {
+    setSubjectsLoading(true)
+    setSubjectError('')
+    if (!supabase || !student?.class_id) {
+      setAvailableSubjects([])
+      setSubjectId('')
+      setSubjectError('Your class is not connected to an active Supabase profile.')
+      setSubjectsLoading(false)
+      return
+    }
+    try {
       const { data, error } = await supabase.from('subjects')
-        .select('name')
+        .select('id,name')
         .eq('class_id', student.class_id)
         .eq('is_active', true)
         .order('sort_order')
-      if (!active) return
-      if (error) {
-        setFileError(error.message)
-        return
-      }
-      const names = (data || []).map(item => item.name)
-      setAvailableSubjects(names)
-      setSubject(current => names.includes(current) ? current : names[0] || '')
+      if (error) throw error
+      const options = data || []
+      setAvailableSubjects(options)
+      setSubjectId(current => options.some(item => item.id === current) ? current : options[0]?.id || '')
+    } catch (error) {
+      setAvailableSubjects([])
+      setSubjectId('')
+      setSubjectError(error instanceof Error ? error.message : 'Could not load active subjects.')
+    } finally {
+      setSubjectsLoading(false)
     }
-    void loadSubjects()
-    return () => { active = false }
   }, [student?.class_id])
+
+  useEffect(() => { void loadSubjects() }, [loadSubjects])
+  const selectedSubject = availableSubjects.find(item => item.id === subjectId)
 
   function onFiles(selected: FileList | null, input?: HTMLInputElement) {
     if (!selected) return
@@ -624,15 +642,21 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
       if (!supabase) throw new Error('Supabase is not configured.')
       let activeBatch = batch
       if (!activeBatch) {
+        if (!selectedSubject || !subjectId) {
+          throw new Error('Choose an active subject before uploading.')
+        }
         const { data: subjectRow, error: subjectError } = await supabase
           .from('subjects')
           .select('id')
+          .eq('id', subjectId)
           .eq('class_id', student.class_id)
-          .eq('name', subject)
           .eq('is_active', true)
           .maybeSingle()
         if (subjectError) throw subjectError
-        if (!subjectRow) throw new Error('The subject could not be found. Ask the owner to complete class setup.')
+        if (!subjectRow) {
+          await loadSubjects()
+          throw new Error('That subject is no longer active. The subject list was refreshed; choose an available subject and try again.')
+        }
         const { data: task, error: taskError } = await supabase.from('tasks').insert({
           class_id: student.class_id, subject_id: subjectRow.id, academic_date: workDate, title: taskTitle.trim(),
           chapter: chapter || null, exercise: exercise || null, page_details: pageDetails || null,
@@ -765,18 +789,21 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
       <div className="page-heading">
         <div><p className="eyebrow">MULTI-PAGE SUBMISSION</p><h1>Upload work</h1></div>
         <button type="button" className="secondary-button" onClick={() => {
-          setTaskTitle(`${subject} notebook pages`)
+          setTaskTitle(`${selectedSubject?.name || 'Class'} notebook pages`)
           setPageDetails('Index followed by completed pages')
-        }} disabled={Boolean(batch)}>
+        }} disabled={Boolean(batch) || !selectedSubject}>
           <BookOpen size={16} /> Whole copy
         </button>
       </div>
       <div className="upload-layout">
         <section className="form-card">
           <h2>1. Label this upload</h2>
-          <label>Subject<select value={subject} onChange={e => setSubject(e.target.value)} disabled={Boolean(batch) || !availableSubjects.length}>
-            {availableSubjects.length ? availableSubjects.map(name => <option key={name}>{name}</option>) : <option value="">No active subjects</option>}
+          <label>Subject<select value={subjectId} onChange={e => setSubjectId(e.target.value)} disabled={Boolean(batch) || subjectsLoading || !availableSubjects.length}>
+            {availableSubjects.length ? availableSubjects.map(item => <option key={item.id} value={item.id}>{item.name}</option>) : <option value="">No active subjects</option>}
           </select></label>
+          {subjectsLoading && <p className="subject-load-message" role="status">Loading subjects for your class…</p>}
+          {subjectError && <p className="subject-load-error" role="alert">Could not load active subjects: {subjectError}<button type="button" className="text-button" onClick={() => void loadSubjects()}>Try again</button></p>}
+          {!subjectsLoading && !subjectError && !availableSubjects.length && <p className="subject-load-error" role="status">No active subjects are available. Ask the owner to enable a subject in Manage Subjects.</p>}
           <div className="form-row">
             <label>Academic date<input type="date" value={workDate} onChange={e => setWorkDate(e.target.value)} disabled={Boolean(batch)} /></label>
             <label>Task title <span>*</span><input value={taskTitle} onChange={e => setTaskTitle(e.target.value)} placeholder="e.g. English notebook pages" disabled={Boolean(batch)} /></label>
@@ -796,7 +823,7 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
               <ImagePlus size={27} /><strong>Choose multiple photos</strong><span>Pick pages from your gallery or files</span>
             </button>
             <button className="upload-dropzone camera-dropzone" onClick={() => cameraRef.current?.click()} type="button" disabled={Boolean(batch)}>
-              <Upload size={27} /><strong>Take a page photo</strong><span>Add one clear page at a time</span>
+              <Camera size={27} /><strong>Take a page photo</strong><span>Open your camera and add pages one by one</span>
             </button>
           </div>
           <input ref={pickerRef} className="hidden-input" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={e => onFiles(e.target.files, e.currentTarget)} />
@@ -848,7 +875,284 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
           <label className="check-label"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} /><span>I have checked my submission and confirm that the information is accurate to the best of my knowledge.</span></label>
         </div>
       </section>
-      <div className="submit-bar"><span>{files.length ? `${files.length} pages ${batch ? 'in this upload' : 'ready'}` : 'Add at least one notebook page'}{batch ? ' · keep this page open until all pages finish' : ''}</span><button className="primary-button" disabled={!availableSubjects.length || !taskTitle.trim() || !confirmed || !files.length || submitting} onClick={submit}>{submitting ? 'Uploading…' : batch ? 'Retry remaining pages' : 'Upload all pages'}</button></div>
+      <div className="submit-bar"><span>{files.length ? `${files.length} pages ${batch ? 'in this upload' : 'ready'}` : 'Add at least one notebook page'}{batch ? ' · keep this page open until all pages finish' : ''}</span><button className="primary-button" disabled={subjectsLoading || !selectedSubject || !taskTitle.trim() || !confirmed || !files.length || submitting} onClick={submit}>{submitting ? 'Uploading…' : batch ? 'Retry remaining pages' : 'Upload all pages'}</button></div>
+    </div>
+  )
+}
+
+function ClassPages({ student, showToast }: { student: any; showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [documents, setDocuments] = useState<ClassDocument[]>([])
+  const [category, setCategory] = useState('')
+  const [title, setTitle] = useState('')
+  const [notes, setNotes] = useState('')
+  const [files, setFiles] = useState<UploadPage[]>([])
+  const [batch, setBatch] = useState<ClassDocumentBatch | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [listError, setListError] = useState('')
+  const [fileError, setFileError] = useState('')
+  const [filterCategory, setFilterCategory] = useState('')
+  const [search, setSearch] = useState('')
+  const pickerRef = useRef<HTMLInputElement>(null)
+  const cameraRef = useRef<HTMLInputElement>(null)
+  const objectUrls = useRef(new Set<string>())
+
+  const loadDocuments = useCallback(async () => {
+    if (!student?.class_id) {
+      setDocuments([])
+      setListError('Your account is not linked to a class.')
+      setLoading(false)
+      return
+    }
+    setLoading(true)
+    setListError('')
+    try {
+      setDocuments(await fetchClassDocuments(student.class_id))
+    } catch (error) {
+      setListError(error instanceof Error ? error.message : 'Could not load class pages.')
+    } finally {
+      setLoading(false)
+    }
+  }, [student?.class_id])
+
+  useEffect(() => { void loadDocuments() }, [loadDocuments])
+  useEffect(() => () => {
+    objectUrls.current.forEach(url => URL.revokeObjectURL(url))
+    objectUrls.current.clear()
+  }, [])
+
+  const categories = [...new Set([
+    'Index', 'Year syllabus', 'Timetable', 'Notice', 'Other',
+    ...documents.map(document => document.category),
+  ])]
+  const visibleDocuments = documents.filter(document =>
+    (!filterCategory || document.category === filterCategory)
+    && `${document.title} ${document.category} ${document.notes || ''}`.toLowerCase().includes(search.toLowerCase())
+  )
+
+  function onFiles(selected: FileList | null, input?: HTMLInputElement) {
+    if (!selected) return
+    const accepted: File[] = []
+    let rejected = 0
+    for (const file of Array.from(selected)) {
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 15 * 1024 * 1024) rejected++
+      else accepted.push(file)
+    }
+    setFileError(rejected ? `${rejected} file(s) skipped. Choose JPEG, PNG or WebP images up to 15 MB each.` : '')
+    if (accepted.length) {
+      const newPages = accepted.map(file => {
+        const url = URL.createObjectURL(file)
+        objectUrls.current.add(url)
+        return { id: crypto.randomUUID(), file, url, rotation: 0 }
+      })
+      setFiles(current => [...current, ...newPages])
+    }
+    if (input) input.value = ''
+  }
+
+  function removeFile(id: string) {
+    if (batch) return
+    const page = files.find(item => item.id === id)
+    if (page) {
+      URL.revokeObjectURL(page.url)
+      objectUrls.current.delete(page.url)
+    }
+    setFiles(current => current.filter(item => item.id !== id))
+  }
+
+  function moveFile(index: number, amount: number) {
+    if (batch) return
+    setFiles(current => {
+      const next = [...current]
+      const target = index + amount
+      if (target < 0 || target >= next.length) return current
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return next
+    })
+  }
+
+  async function submitDocuments() {
+    if (!supabase || !student?.class_id || !category.trim() || !title.trim() || !files.length) return
+    setSubmitting(true)
+    try {
+      let activeBatch = batch
+      if (!activeBatch) {
+        const { data: document, error } = await supabase.from('class_documents').insert({
+          class_id: student.class_id,
+          uploaded_by: student.id,
+          category: category.trim(),
+          title: title.trim(),
+          notes: notes.trim() || null,
+        }).select('id').single()
+        if (error) throw error
+        activeBatch = { documentId: document.id, completedFileIds: [] }
+        setBatch(activeBatch)
+      }
+
+      setProgress({ done: activeBatch.completedFileIds.length, total: files.length, current: '' })
+      for (let index = 0; index < files.length; index++) {
+        const page = files[index]
+        if (activeBatch.completedFileIds.includes(page.id)) continue
+        setProgress({ done: activeBatch.completedFileIds.length, total: files.length, current: page.file.name })
+        let compressed = page.file
+        if (compressed.size > 1.5 * 1024 * 1024) {
+          compressed = await imageCompression(compressed, {
+            maxSizeMB: 1.5, maxWidthOrHeight: 2600, useWebWorker: true,
+          })
+        }
+        const extension = compressed.type === 'image/png' ? 'png' : compressed.type === 'image/webp' ? 'webp' : 'jpg'
+        const storagePath = `${student.class_id}/${activeBatch.documentId}/${index + 1}-${page.id}.${extension}`
+        const { data: existingPage, error: lookupError } = await supabase.from('class_document_pages')
+          .select('id')
+          .eq('document_id', activeBatch.documentId)
+          .eq('page_number', index + 1)
+          .maybeSingle()
+        if (lookupError) throw lookupError
+        if (!existingPage) {
+          const { error: uploadError } = await supabase.storage.from('classwork-documents').upload(storagePath, compressed, {
+            contentType: compressed.type, upsert: false,
+          })
+          const isRetryOfStoredFile = uploadError
+            && (uploadError as { statusCode?: string }).statusCode === '409'
+          if (uploadError && !isRetryOfStoredFile) throw uploadError
+          const { error: pageError } = await supabase.from('class_document_pages').insert({
+            document_id: activeBatch.documentId,
+            page_number: index + 1,
+            storage_path: storagePath,
+            mime_type: compressed.type,
+            file_size: compressed.size,
+            rotation: page.rotation,
+          })
+          if (pageError) throw pageError
+        }
+        activeBatch = {
+          ...activeBatch,
+          completedFileIds: [...activeBatch.completedFileIds, page.id],
+        }
+        setBatch(activeBatch)
+        setProgress({ done: activeBatch.completedFileIds.length, total: files.length, current: '' })
+      }
+
+      showToast('Class pages uploaded successfully.')
+      files.forEach(page => URL.revokeObjectURL(page.url))
+      files.forEach(page => objectUrls.current.delete(page.url))
+      setFiles([])
+      setCategory('')
+      setTitle('')
+      setNotes('')
+      setBatch(null)
+      setFileError('')
+      setProgress(null)
+      await loadDocuments()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Upload paused. Your pages are preserved; retry to continue.', 'error')
+    } finally {
+      setSubmitting(false)
+      setProgress(null)
+    }
+  }
+
+  return (
+    <div className="page class-pages">
+      <div className="page-heading">
+        <div><p className="eyebrow">CLASS REFERENCE</p><h1>Class pages</h1></div>
+        <button className="secondary-button" onClick={() => void loadDocuments()} disabled={loading}>Refresh</button>
+      </div>
+      <p className="class-pages-intro">Share index pages, the year syllabus, timetables, notices, or your own category with the class.</p>
+      <section className="form-card class-document-form">
+        <h2>Add separate class pages</h2>
+        <div className="form-row">
+          <label>Category <span>*</span><input list="class-page-categories" value={category} onChange={e => setCategory(e.target.value)} maxLength={80} placeholder="Choose or type a category" disabled={Boolean(batch)} />
+            <datalist id="class-page-categories">{categories.map(item => <option key={item} value={item} />)}</datalist>
+          </label>
+          <label>Title <span>*</span><input value={title} onChange={e => setTitle(e.target.value)} maxLength={120} placeholder="e.g. Mathematics syllabus 2026" disabled={Boolean(batch)} /></label>
+        </div>
+        <label>Notes <span>(optional)</span><textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={500} placeholder="Add helpful details for classmates" disabled={Boolean(batch)} /></label>
+        <div className="form-card-title"><h2>Choose or take page photos</h2><span>{files.length} {files.length === 1 ? 'page' : 'pages'}</span></div>
+        <p className="upload-instructions">Pick multiple images at once or use the camera button to capture pages one by one. Reorder and check the previews before submitting.</p>
+        <div className="upload-actions">
+          <button className="upload-dropzone" type="button" onClick={() => pickerRef.current?.click()} disabled={Boolean(batch)}>
+            <ImagePlus size={27} /><strong>Choose multiple photos</strong><span>Select several pages from your device</span>
+          </button>
+          <button className="upload-dropzone camera-dropzone" type="button" onClick={() => cameraRef.current?.click()} disabled={Boolean(batch)}>
+            <Camera size={27} /><strong>Take a page photo</strong><span>Open your camera and add pages one by one</span>
+          </button>
+        </div>
+        <input ref={pickerRef} className="hidden-input" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={e => onFiles(e.target.files, e.currentTarget)} />
+        <input ref={cameraRef} className="hidden-input" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={e => onFiles(e.target.files, e.currentTarget)} />
+        {fileError && <p className="file-error" role="alert">{fileError}</p>}
+        {files.length > 0 && (
+          <div className="page-preview-list">
+            {files.map((page, index) => (
+              <div className={`page-preview ${batch?.completedFileIds.includes(page.id) ? 'uploaded' : ''}`} key={page.id}>
+                <div className="page-image-frame"><img src={page.url} alt={`${category || 'Class'} page ${index + 1}`} style={{ transform: `rotate(${page.rotation}deg)` }} /></div>
+                <div className="page-preview-meta">
+                  <strong>Page {index + 1}</strong>
+                  <div>
+                    <button type="button" disabled={Boolean(batch) || index === 0} onClick={() => moveFile(index, -1)} aria-label="Move page earlier"><ChevronLeft size={15} /></button>
+                    <button type="button" disabled={Boolean(batch) || index === files.length - 1} onClick={() => moveFile(index, 1)} aria-label="Move page later"><ChevronRight size={15} /></button>
+                    <button type="button" disabled={Boolean(batch)} onClick={() => setFiles(current => current.map(item => item.id === page.id ? { ...item, rotation: (item.rotation + 90) % 360 } : item))} aria-label="Rotate page"><RotateCw size={15} /></button>
+                    <button type="button" disabled={Boolean(batch)} onClick={() => removeFile(page.id)} aria-label="Remove page"><X size={15} /></button>
+                  </div>
+                </div>
+                {batch?.completedFileIds.includes(page.id) && <span className="page-uploaded"><Check size={13} /> Uploaded</span>}
+              </div>
+            ))}
+          </div>
+        )}
+        {files.length > 0 && !batch && <button type="button" className="text-button clear-class-pages" onClick={() => {
+          files.forEach(page => URL.revokeObjectURL(page.url))
+          files.forEach(page => objectUrls.current.delete(page.url))
+          setFiles([])
+          setFileError('')
+        }}>Clear selected pages</button>}
+        {progress && submitting && (
+          <div className="upload-progress" role="status" aria-live="polite">
+            <div><strong>Uploading page {Math.min(progress.done + 1, progress.total)} of {progress.total}</strong><span>{progress.current || 'Finishing page…'}</span></div>
+            <progress max={progress.total} value={progress.done} />
+          </div>
+        )}
+        {batch && !submitting && batch.completedFileIds.length < files.length && (
+          <div className="retry-note" role="status"><AlertTriangle size={16} /> {batch.completedFileIds.length} of {files.length} pages saved. Retry to continue without duplicating uploaded pages.</div>
+        )}
+        <div className="class-document-submit">
+          <span>{files.length ? `${files.length} pages ready` : 'Add at least one page'}</span>
+          <button className="primary-button" disabled={!student?.class_id || !category.trim() || !title.trim() || !files.length || submitting} onClick={() => void submitDocuments()}>
+            {submitting ? 'Uploading…' : batch ? 'Retry remaining pages' : 'Submit class pages'}
+          </button>
+        </div>
+      </section>
+
+      <div className="class-pages-toolbar">
+        <div className="search-box large"><Search size={16} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search title, category or notes" /></div>
+        <select aria-label="Filter class pages by category" value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
+          <option value="">All categories</option>{categories.map(item => <option key={item}>{item}</option>)}
+        </select>
+      </div>
+      {listError ? <div className="empty-state"><AlertTriangle size={32} /><h3>Could not load class pages</h3><p>{listError}</p><button className="secondary-button" onClick={() => void loadDocuments()}>Try again</button></div>
+        : loading ? <Loading /> : visibleDocuments.length ? (
+          <div className="class-document-list">
+            {visibleDocuments.map(document => (
+              <article className="class-document-card" key={document.id}>
+                <div className="class-document-heading">
+                  <div><span className="category-chip">{document.category}</span><strong>{document.title}</strong><small>Added by {document.uploader_name || 'Class member'} · {new Date(document.created_at).toLocaleDateString()}</small></div>
+                </div>
+                {document.notes && <p>{document.notes}</p>}
+                <div className="class-document-pages">
+                  {document.pages.map(page => (
+                    <a href={page.signed_url} target="_blank" rel="noreferrer" key={page.id} aria-label={`Open ${document.title}, page ${page.page_number}`}>
+                      <img src={page.signed_url} alt={`${document.title}, page ${page.page_number}`} style={{ transform: `rotate(${page.rotation}deg)` }} />
+                      <span>Page {page.page_number}</span>
+                    </a>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state"><Archive size={34} /><h3>{documents.length ? 'No class pages match this filter' : 'No separate pages yet'}</h3><p>{documents.length ? 'Try another category or search.' : 'Add the first index, syllabus, timetable, or custom reference pages above.'}</p></div>
+        )}
     </div>
   )
 }

@@ -21,6 +21,31 @@
 .upload-progress progress{width:100%;height:8px;accent-color:#315f91}
 .retry-note{display:flex;align-items:flex-start;gap:7px;margin-top:14px;padding:10px;border-radius:8px;background:#fff7e8;color:#8b6a2b;font-size:11px;line-height:1.5}
 .retry-note svg{flex:none;margin-top:1px}
+.subject-load-message,.subject-load-error{margin:-6px 0 12px;color:#78859a;font-size:11px;line-height:1.5}
+.subject-load-error{color:#a34e4e}
+.subject-load-error .text-button{display:block;margin-top:4px;padding:0}
+.class-pages-intro{margin:-8px 0 16px;color:#778399;font-size:13px;line-height:1.5}
+.class-document-form{margin-bottom:18px}
+.class-document-form .form-card-title{align-items:center;margin:8px 0}
+.class-document-form .form-card-title h2{margin:0}
+.class-document-form .upload-instructions{margin:8px 0 14px}
+.class-document-submit{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:16px}
+.clear-class-pages{margin-top:8px;padding:0}
+.class-document-submit>span{color:#78859a;font-size:12px}
+.class-pages-toolbar{display:flex;gap:10px;margin-bottom:14px}
+.class-pages-toolbar .search-box{flex:1}
+.class-pages-toolbar select{width:min(230px,40%);height:40px;padding:0 10px;border:1px solid #dde4ed;border-radius:8px;background:#fff;color:#344259}
+.class-document-list{display:grid;gap:12px}
+.class-document-card{padding:16px;border:1px solid #e5eaf2;border-radius:12px;background:#fff}
+.class-document-heading>div{display:grid;justify-items:start;gap:5px}
+.category-chip{padding:4px 8px;border-radius:20px;background:#edf3fa;color:#315c8b;font-size:10px;font-weight:750}
+.class-document-heading strong{font-size:15px}
+.class-document-heading small{color:#8792a4;font-size:11px}
+.class-document-card>p{margin:10px 0 0;color:#58677d;font-size:12px;line-height:1.5}
+.class-document-pages{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-top:14px}
+.class-document-pages a{overflow:hidden;border:1px solid #e5eaf2;border-radius:9px;background:#f1f3f6;color:#58677d;text-decoration:none}
+.class-document-pages img{width:100%;height:165px;display:block;object-fit:contain}
+.class-document-pages a span{display:block;padding:7px 9px;background:#fff;font-size:11px}
 @media(max-width:620px){
   .upload-actions{grid-template-columns:1fr}
   .upload-dropzone{height:98px}
@@ -28,4 +53,10 @@
   .page-image-frame{height:145px}
   .upload-progress>div{display:block}
   .upload-progress>div span{display:block;margin-top:4px}
+  .class-document-submit{align-items:stretch;flex-direction:column}
+  .class-document-submit .primary-button{width:100%}
+  .class-pages-toolbar{flex-wrap:wrap}
+  .class-pages-toolbar .search-box{flex-basis:100%}
+  .class-pages-toolbar select{width:100%}
+  .class-document-pages{grid-template-columns:repeat(2,minmax(0,1fr))}
 }

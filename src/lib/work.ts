@@ -53,6 +53,28 @@ export type PdfArchive = {
   signed_url: string
 }
 
+export type ClassDocumentPage = {
+  id: string
+  document_id: string
+  page_number: number
+  storage_path: string
+  mime_type: string
+  rotation: number
+  signed_url: string
+}
+
+export type ClassDocument = {
+  id: string
+  class_id: string
+  category: string
+  title: string
+  notes: string | null
+  created_at: string
+  uploaded_by: string
+  uploader_name: string | null
+  pages: ClassDocumentPage[]
+}
+
 export async function fetchWorkSubmissions(contributorId?: string): Promise<WorkSubmission[]> {
   const client = supabase
   if (!client) throw new Error('Supabase is not configured.')
@@ -110,6 +132,65 @@ export async function fetchWorkSubmissions(contributorId?: string): Promise<Work
       return signedUrl ? [{ ...page, signed_url: signedUrl }] : []
     }),
   }))
+}
+
+export async function fetchClassDocuments(classId: string): Promise<ClassDocument[]> {
+  const client = supabase
+  if (!client) throw new Error('Supabase is not configured.')
+  const { data: documents, error } = await client.from('class_documents')
+    .select('id,class_id,category,title,notes,created_at,uploaded_by')
+    .eq('class_id', classId)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  if (!documents?.length) return []
+
+  const documentIds = documents.map(document => document.id)
+  const { data: pages, error: pagesError } = await client.from('class_document_pages')
+    .select('id,document_id,page_number,storage_path,mime_type,rotation')
+    .in('document_id', documentIds)
+    .order('page_number')
+  if (pagesError) throw pagesError
+
+  const storedPages = pages || []
+  const paths = [...new Set(storedPages.map(page => page.storage_path))]
+  const signedByPath = new Map<string, string>()
+  if (paths.length) {
+    const { data: signedFiles, error: signedError } = await client.storage
+      .from('classwork-documents').createSignedUrls(paths, 3600)
+    if (signedError) throw signedError
+    for (const file of signedFiles || []) {
+      if (file.error || !file.path || !file.signedUrl) {
+        throw new Error(file.error || 'Could not create a secure link for a class page.')
+      }
+      signedByPath.set(file.path, file.signedUrl)
+    }
+    if (signedByPath.size !== paths.length) throw new Error('Could not create secure links for all class pages.')
+  }
+
+  const uploaderIds = [...new Set(documents.map(document => document.uploaded_by))]
+  const { data: uploaders, error: uploadersError } = await client.from('students')
+    .select('id,display_name')
+    .in('id', uploaderIds)
+  if (uploadersError) throw uploadersError
+  const nameById = new Map((uploaders || []).map(uploader => [uploader.id, uploader.display_name]))
+  const pagesByDocument = new Map<string, ClassDocumentPage[]>()
+  for (const page of storedPages) {
+    const signedUrl = signedByPath.get(page.storage_path)
+    if (!signedUrl) throw new Error(`Could not create a secure link for page ${page.page_number}.`)
+    const documentPages = pagesByDocument.get(page.document_id) || []
+    documentPages.push({ ...page, signed_url: signedUrl })
+    pagesByDocument.set(page.document_id, documentPages)
+  }
+
+  return documents.flatMap(document => {
+    const documentPages = pagesByDocument.get(document.id) || []
+    if (!documentPages.length) return []
+    return [{
+      ...document,
+      uploader_name: nameById.get(document.uploaded_by) || null,
+      pages: documentPages,
+    }]
+  })
 }
 
 export async function fetchCuratedPages(): Promise<CuratedPage[]> {
