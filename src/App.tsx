@@ -9,6 +9,8 @@ import {
 import { jsPDF } from 'jspdf'
 import imageCompression from 'browser-image-compression'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { createPagesPdfBlob, downloadPagesPdf, fetchCuratedPages, fetchPdfArchives, fetchWorkSubmissions } from './lib/work'
+import type { CuratedPage, PdfArchive, WorkSubmission } from './lib/work'
 import './App.css'
 import './upload.css'
 
@@ -22,7 +24,8 @@ const subjects = [
 ]
 
 type PageName = 'Dashboard' | 'Daily Work' | 'Upload Work' | 'Digital Notebook' |
-  'All Submissions' | 'My Contributions' | 'Admin Panel' | 'Member Approvals' | 'Settings'
+  'All Submissions' | 'My Contributions' | 'Admin Panel' | 'Member Approvals' |
+  'Manage Subjects' | 'Reports' | 'Audit History' | 'Settings'
 
 type TaskRow = {
   id: string
@@ -82,6 +85,7 @@ function App() {
   const [pendingCount, setPendingCount] = useState(0)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [profileRefreshVersion, setProfileRefreshVersion] = useState(0)
+  const loadRequestId = useRef(0)
 
   const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
     setToast({ text, type })
@@ -92,11 +96,13 @@ function App() {
   const loadData = useCallback(async () => {
     const client = supabase
     if (!client || !userId) return
+    const requestId = ++loadRequestId.current
     setLoading(true)
     try {
       const { data: profile, error: profileError } = await client
         .from('students').select('*').eq('id', userId).maybeSingle()
       if (profileError) throw profileError
+      if (requestId !== loadRequestId.current) return
       setStudent(profile)
       if (profile?.status === 'approved') {
         const { data, error } = await client.from('tasks')
@@ -104,14 +110,18 @@ function App() {
           .eq('academic_date', selectedDate)
           .order('created_at', { ascending: false })
         if (error) throw error
+        if (requestId !== loadRequestId.current) return
         setTasks((data as unknown as TaskRow[]) || [])
       } else {
         setTasks([])
       }
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not load your class profile.', 'error')
+      if (requestId === loadRequestId.current) {
+        setTasks([])
+        showToast(error instanceof Error ? error.message : 'Could not load your class profile.', 'error')
+      }
     } finally {
-      setLoading(false)
+      if (requestId === loadRequestId.current) setLoading(false)
     }
   }, [userId, selectedDate, showToast])
 
@@ -129,10 +139,16 @@ function App() {
   }, [loadData, profileRefreshVersion])
 
   async function signOut() {
-    await supabase?.auth.signOut()
-    setSession(null)
-    setStudent(null)
-    setPendingCount(0)
+    try {
+      const { error } = await supabase!.auth.signOut()
+      if (error) throw error
+      setSession(null)
+      setStudent(null)
+      setPendingCount(0)
+      setNotificationsOpen(false)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not sign out.', 'error')
+    }
   }
 
   const navigate = (next: PageName) => {
@@ -207,6 +223,9 @@ function App() {
   if (student && student.status === 'pending') {
     return <PendingScreen student={student} onLogout={signOut} />
   }
+  if (student && student.status === 'suspended') {
+    return <SuspendedScreen onLogout={signOut} />
+  }
 
   return (
     <div className="app-shell">
@@ -264,16 +283,19 @@ function App() {
         </header>
 
         {loading ? <Loading /> :
-          page === 'Dashboard' ? <Dashboard date={selectedDate} tasks={tasks} navigate={navigate} /> :
+          page === 'Dashboard' ? <Dashboard date={selectedDate} tasks={tasks} navigate={navigate} student={student} showToast={showToast} /> :
           page === 'Upload Work' ? <UploadWork student={student} date={selectedDate} showToast={showToast} onComplete={loadData} /> :
-          page === 'Digital Notebook' ? <Notebook /> :
+          page === 'Digital Notebook' ? <Notebook showToast={showToast} student={student} /> :
           page === 'Daily Work' ? <DailyWork date={selectedDate} tasks={tasks} navigate={navigate} /> :
-          page === 'All Submissions' ? <SubmissionsView /> :
-          page === 'My Contributions' ? <Contributions student={student} /> :
+          page === 'All Submissions' ? <SubmissionsView student={student} showToast={showToast} /> :
+          page === 'My Contributions' ? <Contributions student={student} showToast={showToast} /> :
           page === 'Admin Panel' && student?.is_owner ? <AdminPanel navigate={navigate} pendingCount={pendingCount} /> :
           page === 'Member Approvals' && student?.is_owner ? <MemberApprovals showToast={showToast} /> :
+          page === 'Manage Subjects' && student?.is_owner ? <ManageSubjects student={student} showToast={showToast} /> :
+          page === 'Reports' && student?.is_owner ? <ReportsView student={student} showToast={showToast} /> :
+          page === 'Audit History' && student?.is_owner ? <AuditHistory showToast={showToast} /> :
           page === 'Settings' ? <SettingsView student={student} /> :
-          <Dashboard date={selectedDate} tasks={tasks} navigate={navigate} />}
+          <Dashboard date={selectedDate} tasks={tasks} navigate={navigate} student={student} showToast={showToast} />}
       </main>
       {toast && <div className={`toast ${toast.type}`}>{toast.type === 'success' ? <Check size={17} /> : <AlertTriangle size={17} />}{toast.text}</div>}
     </div>
@@ -315,26 +337,29 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast, onJoined }:
   async function submitAuth(e: FormEvent) {
     e.preventDefault()
     setLoading(true)
-    if (mode === 'signin') {
-      const { error } = await supabase!.auth.signInWithPassword({ email, password })
-      if (error) showToast(error.message, 'error')
-    } else {
-      const { data, error } = await supabase!.auth.signUp({ email, password })
-      if (error) { showToast(error.message, 'error'); setLoading(false); return }
-      if (data.user && data.session) {
-        const { error: joinError } = await supabase!.rpc('join_class', {
-          invite_code: invite, student_name: name, student_roll: roll
-        })
-        if (joinError) showToast(joinError.message, 'error')
-        else {
+    try {
+      if (mode === 'signin') {
+        const { error } = await supabase!.auth.signInWithPassword({ email, password })
+        if (error) throw error
+      } else {
+        const { data, error } = await supabase!.auth.signUp({ email, password })
+        if (error) throw error
+        if (data.user && data.session) {
+          const { error: joinError } = await supabase!.rpc('join_class', {
+            invite_code: invite, student_name: name, student_roll: roll
+          })
+          if (joinError) throw joinError
           showToast('Registration submitted for owner approval.')
           onJoined?.()
+        } else if (data.user) {
+          showToast('Account created. Confirm the email, then sign in and join the class.')
         }
-      } else if (data.user) {
-        showToast('Account created. Confirm the email, then sign in and join the class.')
       }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not complete authentication.', 'error')
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   return (
@@ -379,6 +404,19 @@ function PendingScreen({ student, onLogout }: any) {
   )
 }
 
+function SuspendedScreen({ onLogout }: { onLogout: () => void }) {
+  return (
+    <div className="pending-screen">
+      <div className="pending-card">
+        <div className="brand-mark large"><ShieldCheck size={28} /></div>
+        <h1>Access paused</h1>
+        <p>Your account is currently unable to access the class workspace. Contact the class owner if you think this is a mistake.</p>
+        <button className="secondary-button" onClick={onLogout}>Sign out</button>
+      </div>
+    </div>
+  )
+}
+
 function JoinScreen({ onJoined, showToast, onLogout }: any) {
   const [name, setName] = useState('')
   const [roll, setRoll] = useState('')
@@ -388,17 +426,20 @@ function JoinScreen({ onJoined, showToast, onLogout }: any) {
   async function join(e: FormEvent) {
     e.preventDefault()
     setLoading(true)
-    const { error } = await supabase!.rpc('join_class', {
-      invite_code: invite,
-      student_name: name,
-      student_roll: roll,
-    })
-    if (error) showToast(error.message, 'error')
-    else {
+    try {
+      const { error } = await supabase!.rpc('join_class', {
+        invite_code: invite,
+        student_name: name,
+        student_roll: roll,
+      })
+      if (error) throw error
       showToast('Class registration saved.')
       await onJoined()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not submit your class request.', 'error')
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   return (
@@ -425,7 +466,25 @@ function Loading() {
   )
 }
 
-function Dashboard({ date, tasks, navigate }: { date: string; tasks: TaskRow[]; navigate: (page: PageName) => void }) {
+function Dashboard({ date, tasks, navigate, student, showToast }: {
+  date: string
+  tasks: TaskRow[]
+  navigate: (page: PageName) => void
+  student: any
+  showToast: (text: string, type?: 'success' | 'error') => void
+}) {
+  const [archives, setArchives] = useState<PdfArchive[]>([])
+  const loadArchives = useCallback(async () => {
+    if (!student?.class_id) return
+    try {
+      setArchives(await fetchPdfArchives(student.class_id, 3))
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load published PDFs.', 'error')
+    }
+  }, [showToast, student?.class_id])
+
+  useEffect(() => { void loadArchives() }, [loadArchives])
+
   return (
     <div className="page">
       <div className="page-heading">
@@ -442,7 +501,15 @@ function Dashboard({ date, tasks, navigate }: { date: string; tasks: TaskRow[]; 
         </section>
         <section className="published-card">
           <div className="section-title"><div><span>Recently published PDFs</span><strong>PDF archive</strong></div><button className="text-button" onClick={() => navigate('Digital Notebook')}>View archive</button></div>
-          <div className="empty-inline"><Archive size={24} /><div><strong>No published PDFs</strong><span>Published notebooks will appear here.</span></div></div>
+          {archives.length ? (
+            <div className="dashboard-archives">
+              {archives.map(archive => (
+                <a key={archive.id} href={archive.signed_url} target="_blank" rel="noreferrer">
+                  <FileText size={17} /><span><strong>{archive.subject_name || 'Class'} · v{archive.version}</strong><small>{new Date(archive.published_at).toLocaleDateString()}</small></span><Download size={15} />
+                </a>
+              ))}
+            </div>
+          ) : <div className="empty-inline"><Archive size={24} /><div><strong>No published PDFs</strong><span>Published notebooks will appear here.</span></div></div>}
         </section>
       </div>
       <div className="section-title subjects-title"><div><span>Subjects</span><strong>Daily work</strong></div><button className="text-button" onClick={() => navigate('Daily Work')}>View all</button></div>
@@ -462,7 +529,7 @@ function Dashboard({ date, tasks, navigate }: { date: string; tasks: TaskRow[]; 
       {tasks.length ? (
         <div className="task-list">
           {tasks.map(task => (
-            <button className="task-row" key={task.id} onClick={() => navigate('Digital Notebook')}>
+            <button className="task-row" key={task.id} onClick={() => navigate('All Submissions')}>
               <div className="task-icon"><FileText size={18} /></div>
               <div className="task-main"><strong>{task.title}</strong><span>{task.subjects?.name || 'Subject'} · {task.chapter || 'No chapter'}</span></div>
               <span className={`status-pill ${task.status}`}>{task.status.replaceAll('_', ' ')}</span>
@@ -479,6 +546,7 @@ function Dashboard({ date, tasks, navigate }: { date: string; tasks: TaskRow[]; 
 
 function UploadWork({ student, date, showToast, onComplete }: any) {
   const [subject, setSubject] = useState(subjects[0].name)
+  const [availableSubjects, setAvailableSubjects] = useState<string[]>([])
   const [taskTitle, setTaskTitle] = useState('')
   const [chapter, setChapter] = useState('')
   const [exercise, setExercise] = useState('')
@@ -495,10 +563,36 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
   const cameraRef = useRef<HTMLInputElement>(null)
   const objectUrls = useRef(new Set<string>())
 
+  useEffect(() => {
+    if (!batch) setWorkDate(date)
+  }, [batch, date])
+
   useEffect(() => () => {
     objectUrls.current.forEach(url => URL.revokeObjectURL(url))
     objectUrls.current.clear()
   }, [])
+
+  useEffect(() => {
+    let active = true
+    async function loadSubjects() {
+      if (!supabase || !student?.class_id) return
+      const { data, error } = await supabase.from('subjects')
+        .select('name')
+        .eq('class_id', student.class_id)
+        .eq('is_active', true)
+        .order('sort_order')
+      if (!active) return
+      if (error) {
+        setFileError(error.message)
+        return
+      }
+      const names = (data || []).map(item => item.name)
+      setAvailableSubjects(names)
+      setSubject(current => names.includes(current) ? current : names[0] || '')
+    }
+    void loadSubjects()
+    return () => { active = false }
+  }, [student?.class_id])
 
   function onFiles(selected: FileList | null, input?: HTMLInputElement) {
     if (!selected) return
@@ -535,6 +629,7 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
           .select('id')
           .eq('class_id', student.class_id)
           .eq('name', subject)
+          .eq('is_active', true)
           .maybeSingle()
         if (subjectError) throw subjectError
         if (!subjectRow) throw new Error('The subject could not be found. Ask the owner to complete class setup.')
@@ -679,7 +774,9 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
       <div className="upload-layout">
         <section className="form-card">
           <h2>1. Label this upload</h2>
-          <label>Subject<select value={subject} onChange={e => setSubject(e.target.value)} disabled={Boolean(batch)}>{subjects.map(s => <option key={s.name}>{s.name}</option>)}</select></label>
+          <label>Subject<select value={subject} onChange={e => setSubject(e.target.value)} disabled={Boolean(batch) || !availableSubjects.length}>
+            {availableSubjects.length ? availableSubjects.map(name => <option key={name}>{name}</option>) : <option value="">No active subjects</option>}
+          </select></label>
           <div className="form-row">
             <label>Academic date<input type="date" value={workDate} onChange={e => setWorkDate(e.target.value)} disabled={Boolean(batch)} /></label>
             <label>Task title <span>*</span><input value={taskTitle} onChange={e => setTaskTitle(e.target.value)} placeholder="e.g. English notebook pages" disabled={Boolean(batch)} /></label>
@@ -751,7 +848,7 @@ function UploadWork({ student, date, showToast, onComplete }: any) {
           <label className="check-label"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} /><span>I have checked my submission and confirm that the information is accurate to the best of my knowledge.</span></label>
         </div>
       </section>
-      <div className="submit-bar"><span>{files.length ? `${files.length} pages ${batch ? 'in this upload' : 'ready'}` : 'Add at least one notebook page'}{batch ? ' · keep this page open until all pages finish' : ''}</span><button className="primary-button" disabled={!taskTitle.trim() || !confirmed || !files.length || submitting} onClick={submit}>{submitting ? 'Uploading…' : batch ? 'Retry remaining pages' : 'Upload all pages'}</button></div>
+      <div className="submit-bar"><span>{files.length ? `${files.length} pages ${batch ? 'in this upload' : 'ready'}` : 'Add at least one notebook page'}{batch ? ' · keep this page open until all pages finish' : ''}</span><button className="primary-button" disabled={!availableSubjects.length || !taskTitle.trim() || !confirmed || !files.length || submitting} onClick={submit}>{submitting ? 'Uploading…' : batch ? 'Retry remaining pages' : 'Upload all pages'}</button></div>
     </div>
   )
 }
@@ -787,66 +884,353 @@ function DailyWork({ date, tasks, navigate }: { date: string; tasks: TaskRow[]; 
           </section>
         )
       })}
-      {!tasks.length && <div className="empty-state"><CalendarDays size={34} /><h3>No submissions for this date</h3><p>Select a different date or upload work.</p></div>}
+      {!tasks.length && <div className="empty-state"><CalendarDays size={34} /><h3>No submissions for this date</h3><p>Select a different date or upload work.</p><button className="secondary-button" onClick={() => navigate('Upload Work')}>Upload work</button></div>}
     </div>
   )
 }
 
-function Notebook() {
+function Notebook({ showToast, student }: { showToast: (text: string, type?: 'success' | 'error') => void; student: any }) {
   const [subject, setSubject] = useState(subjects[0].name)
+  const [search, setSearch] = useState('')
+  const [pages, setPages] = useState<CuratedPage[]>([])
+  const [archives, setArchives] = useState<PdfArchive[]>([])
+  const [loading, setLoading] = useState(true)
+  const [downloading, setDownloading] = useState(false)
+  const [publishing, setPublishing] = useState(false)
+
+  const loadPages = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [curatedPages, pdfArchives] = await Promise.all([
+        fetchCuratedPages(),
+        student?.class_id ? fetchPdfArchives(student.class_id) : Promise.resolve([]),
+      ])
+      setPages(curatedPages)
+      setArchives(pdfArchives)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load the digital notebook.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [showToast, student?.class_id])
+
+  useEffect(() => { void loadPages() }, [loadPages])
+
+  const visiblePages = pages
+    .filter(page => page.task.subjects?.name === subject)
+    .filter(page => `${page.task.title} ${page.task.chapter || ''} ${page.task.exercise || ''}`.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => a.task.academic_date.localeCompare(b.task.academic_date) || a.page_number - b.page_number)
+  const subjectPages = pages.filter(page => page.task.subjects?.name === subject)
+
   async function downloadSubjectPdf() {
-    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-    pdf.setProperties({ title: `Class 5 ${subject} Notebook` })
-    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(24)
-    pdf.text('Class 5 Digital Notebook', 105, 30, { align: 'center' })
-    pdf.setFontSize(16); pdf.text(subject, 105, 42, { align: 'center' })
-    pdf.setDrawColor(200); pdf.line(20, 50, 190, 50)
-    pdf.setFont('helvetica', 'normal'); pdf.setFontSize(11)
-    pdf.text('No selected notebook pages are available for publication.', 20, 65)
-    pdf.save(`class-5-${subject.replaceAll(' / ', '-').toLowerCase()}-notebook.pdf`)
+    setDownloading(true)
+    try {
+      await downloadPagesPdf(
+        `Class 5 ${subject} Notebook`,
+        visiblePages.map(page => ({
+          label: `${page.task.title} · Page ${page.page_number}`,
+          signedUrl: page.page.signed_url,
+          rotation: page.page.rotation,
+        })),
+        `class-5-${subject.replaceAll(' / ', '-').toLowerCase()}-notebook.pdf`,
+      )
+      showToast('Notebook PDF downloaded.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not create the notebook PDF.', 'error')
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  async function publishSubjectPdf() {
+    if (!supabase || !student?.is_owner || !subjectPages.length) return
+    setPublishing(true)
+    let path: string | null = null
+    try {
+      const { data: subjectRow, error: subjectError } = await supabase.from('subjects')
+        .select('id')
+        .eq('class_id', student.class_id)
+        .eq('name', subject)
+        .maybeSingle()
+      if (subjectError) throw subjectError
+      if (!subjectRow) throw new Error('The selected subject is no longer available.')
+
+      const { data: latest, error: latestError } = await supabase.from('daily_pdf_archives')
+        .select('version')
+        .eq('class_id', student.class_id)
+        .eq('pdf_type', 'subject')
+        .eq('subject_id', subjectRow.id)
+        .order('version', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (latestError) throw latestError
+      const version = (latest?.version || 0) + 1
+      const blob = await createPagesPdfBlob(`Class 5 ${subject} Notebook`, subjectPages.map(page => ({
+        label: `${page.task.title} · Page ${page.page_number}`,
+        signedUrl: page.page.signed_url,
+        rotation: page.page.rotation,
+      })))
+      path = `${student.class_id}/subject/${subjectRow.id}/${crypto.randomUUID()}-v${version}.pdf`
+      const { error: uploadError } = await supabase.storage.from('classwork-pdfs').upload(path, blob, {
+        contentType: 'application/pdf',
+        upsert: false,
+      })
+      if (uploadError) throw uploadError
+      const { error: archiveError } = await supabase.from('daily_pdf_archives').insert({
+        class_id: student.class_id,
+        pdf_type: 'subject',
+        subject_id: subjectRow.id,
+        storage_path: path,
+        version,
+        published_by: student.id,
+      })
+      if (archiveError) {
+        const { error: cleanupError } = await supabase.storage.from('classwork-pdfs').remove([path])
+        if (cleanupError) throw new Error(`${archiveError.message}; uploaded file cleanup failed: ${cleanupError.message}`)
+        throw archiveError
+      }
+      showToast(`${subject} PDF published to the class archive.`)
+      await loadPages()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not publish the subject PDF.', 'error')
+    } finally {
+      setPublishing(false)
+    }
   }
 
   return (
     <div className="page">
-      <div className="page-heading"><div><p className="eyebrow">DIGITAL NOTEBOOK</p><h1>Curated pages</h1></div><button className="secondary-button" onClick={downloadSubjectPdf}><Download size={16} /> Download subject PDF</button></div>
-      <div className="notebook-toolbar">
-        <label>Subject<select value={subject} onChange={e => setSubject(e.target.value)}>{subjects.map(s => <option key={s.name}>{s.name}</option>)}</select></label>
-        <div className="search-box"><Search size={16} /><input placeholder="Search task title" /></div>
-      </div>
-      <div className="notebook-layout">
-        <aside className="notebook-index">
-          <strong>Notebook index</strong>
-          {subjects.map(s => <button key={s.name} className={subject === s.name ? 'active' : ''} onClick={() => setSubject(s.name)}><span style={{ background: s.color }}>{s.short}</span>{s.name}</button>)}
-        </aside>
-        <div className="notebook-empty">
-          <div className="empty-page"><BookOpen size={38} /></div>
-          <h3>No selected pages yet</h3>
-          <p>The owner can review submissions and select one page for each numbered notebook slot.</p>
+      <div className="page-heading">
+        <div><p className="eyebrow">DIGITAL NOTEBOOK</p><h1>Curated pages</h1></div>
+        <div className="notebook-actions">
+          {student?.is_owner && <button className="secondary-button" onClick={() => void publishSubjectPdf()} disabled={publishing || loading || !subjectPages.length}>{publishing ? 'Publishing…' : 'Publish PDF'}</button>}
+          <button className="secondary-button" onClick={() => void downloadSubjectPdf()} disabled={downloading || loading || !visiblePages.length}>
+            <Download size={16} />{downloading ? 'Preparing PDF…' : 'Download PDF'}
+          </button>
         </div>
       </div>
-    </div>
-  )
-}
-
-function SubmissionsView() {
-  return (
-    <div className="page">
-      <div className="page-heading"><div><p className="eyebrow">WORK ARCHIVE</p><h1>All submissions</h1></div></div>
-      <div className="filter-bar">
-        <div className="search-box large"><Search size={16} /><input placeholder="Search title, chapter or contributor" /></div>
-        <select aria-label="Filter subject"><option>All subjects</option>{subjects.map(s => <option key={s.name}>{s.name}</option>)}</select>
-        <input type="date" aria-label="Filter date" />
+      <div className="notebook-toolbar">
+        <label>Subject<select value={subject} onChange={e => setSubject(e.target.value)}>{subjects.map(s => <option key={s.name}>{s.name}</option>)}</select></label>
+        <div className="search-box"><Search size={16} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search task title" /></div>
       </div>
-      <div className="empty-state"><FolderOpen size={34} /><h3>No submissions match this view</h3><p>Submitted work will appear here after the database is configured and work is uploaded.</p></div>
+      {loading ? <Loading /> : visiblePages.length ? (
+        <div className="curated-page-list">
+          {visiblePages.map(page => (
+            <article className="curated-page" key={`${page.task_id}-${page.page_number}`}>
+              <img src={page.page.signed_url} alt={`${page.task.title}, page ${page.page_number}`} style={{ transform: `rotate(${page.page.rotation}deg)` }} />
+              <div><strong>{page.task.title}</strong><span>Page {page.page_number} · {formatDate(page.task.academic_date)}</span></div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state"><BookOpen size={34} /><h3>{pages.length ? 'No pages match this filter' : 'No curated pages yet'}</h3><p>{pages.length ? 'Try another search or subject.' : 'The owner can select submitted pages from All Submissions.'}</p></div>
+      )}
+      <section className="archive-section">
+        <div className="section-title"><div><span>CLASS ARCHIVE</span><strong>Published PDFs</strong></div><button className="text-button" onClick={() => void loadPages()}>Refresh</button></div>
+        {archives.length ? (
+          <div className="archive-list">
+            {archives.map(archive => (
+              <a className="archive-item" key={archive.id} href={archive.signed_url} target="_blank" rel="noreferrer">
+                <FileText size={18} />
+                <div><strong>{archive.subject_name || 'Class'} · Version {archive.version}</strong><span>Published {new Date(archive.published_at).toLocaleString()}</span></div>
+                <Download size={16} />
+              </a>
+            ))}
+          </div>
+        ) : <p className="archive-empty">No PDFs have been published yet.</p>}
+      </section>
     </div>
   )
 }
 
-function Contributions({ student }: any) {
+function SubmissionsView({ student, showToast }: { student: any; showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [submissions, setSubmissions] = useState<WorkSubmission[]>([])
+  const [selectedBySlot, setSelectedBySlot] = useState<Record<string, string>>({})
+  const [search, setSearch] = useState('')
+  const [subject, setSubject] = useState('')
+  const [date, setDate] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [busyPageId, setBusyPageId] = useState<string | null>(null)
+  const [reportingId, setReportingId] = useState<string | null>(null)
+  const [reportReason, setReportReason] = useState('')
+
+  const loadSubmissions = useCallback(async () => {
+    setLoading(true)
+    try {
+      const work = await fetchWorkSubmissions()
+      setSubmissions(work)
+      if (student?.is_owner && supabase) {
+        const { data, error } = await supabase.from('notebook_page_selections')
+          .select('task_id,page_number,submission_page_id')
+          .eq('status', 'finalised')
+        if (error) throw error
+        setSelectedBySlot(Object.fromEntries((data || []).flatMap(item =>
+          item.submission_page_id ? [[`${item.task_id}:${item.page_number}`, item.submission_page_id]] : []
+        )))
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load submissions.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [showToast, student?.is_owner])
+
+  useEffect(() => { void loadSubmissions() }, [loadSubmissions])
+
+  const visibleSubmissions = submissions.filter(submission => {
+    const task = submission.task
+    const searchable = `${task?.title || ''} ${task?.chapter || ''} ${task?.exercise || ''} ${submission.contributor?.display_name || ''} ${submission.contributor?.roll_number || ''}`.toLowerCase()
+    return (!subject || task?.subjects?.name === subject)
+      && (!date || task?.academic_date === date)
+      && searchable.includes(search.toLowerCase())
+  })
+
+  async function selectPage(submission: WorkSubmission, page: WorkSubmission['pages'][number]) {
+    if (!supabase || !student?.is_owner || !submission.task) return
+    setBusyPageId(page.id)
+    try {
+      const { error } = await supabase.rpc('select_notebook_page', {
+        p_task_id: submission.task_id,
+        p_page_number: page.page_number,
+        p_submission_page_id: page.id,
+      })
+      if (error) throw error
+      setSelectedBySlot(current => ({ ...current, [`${submission.task_id}:${page.page_number}`]: page.id }))
+      const expectedPageCount = submissions
+        .filter(item => item.task_id === submission.task_id && !item.is_hidden)
+        .flatMap(item => item.pages)
+        .reduce((maxPage, item) => Math.max(maxPage, item.page_number), 0)
+      const { count, error: selectionError } = await supabase.from('notebook_page_selections')
+        .select('id', { count: 'exact', head: true })
+        .eq('task_id', submission.task_id)
+        .eq('status', 'finalised')
+      if (selectionError) throw selectionError
+      if (expectedPageCount > 0 && (count || 0) >= expectedPageCount) {
+        const { error: taskError } = await supabase.from('tasks')
+          .update({ status: 'finalised' })
+          .eq('id', submission.task_id)
+        if (taskError) throw taskError
+      }
+      showToast(`Page ${page.page_number} selected for the digital notebook.`)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not select this notebook page.', 'error')
+    } finally {
+      setBusyPageId(null)
+    }
+  }
+
+  async function submitReport(submissionId: string) {
+    if (!supabase || !student?.id || !reportReason.trim()) return
+    try {
+      const { error } = await supabase.from('reports').insert({
+        submission_id: submissionId,
+        reporter_id: student.id,
+        reason: reportReason.trim(),
+      })
+      if (error) throw error
+      showToast('Report sent to the class owner.')
+      setReportingId(null)
+      setReportReason('')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not submit this report.', 'error')
+    }
+  }
+
   return (
     <div className="page">
-      <div className="page-heading"><div><p className="eyebrow">CONTRIBUTOR HISTORY</p><h1>My contributions</h1></div></div>
-      <div className="empty-state"><UserRound size={34} /><h3>No contributions yet</h3><p>Uploads made by {student?.display_name || 'you'} will appear here.</p></div>
+      <div className="page-heading">
+        <div><p className="eyebrow">WORK ARCHIVE</p><h1>All submissions</h1></div>
+        <button className="secondary-button" onClick={() => void loadSubmissions()}>Refresh</button>
+      </div>
+      <div className="filter-bar">
+        <div className="search-box large"><Search size={16} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search title, chapter or contributor" /></div>
+        <select aria-label="Filter subject" value={subject} onChange={e => setSubject(e.target.value)}><option value="">All subjects</option>{subjects.map(s => <option key={s.name}>{s.name}</option>)}</select>
+        <input type="date" aria-label="Filter date" value={date} onChange={e => setDate(e.target.value)} />
+      </div>
+      {loading ? <Loading /> : visibleSubmissions.length ? (
+        <div className="submission-list">
+          {visibleSubmissions.map(submission => (
+            <article className="submission-card" key={submission.id}>
+              <div className="submission-heading">
+                <div><strong>{submission.task?.title || 'Untitled work'}</strong><span>{submission.task?.subjects?.name || 'Subject'} · {submission.task?.chapter || 'No chapter'} · {formatDate(submission.task?.academic_date || '')}</span></div>
+                <div className="submission-contributor">{submission.contributor?.display_name || 'Student'} · Roll {submission.contributor?.roll_number || '—'}</div>
+              </div>
+              {submission.notes && <p className="submission-notes">{submission.notes}</p>}
+              <div className="submission-pages">
+                {submission.pages.map(page => {
+                  const slot = `${submission.task_id}:${page.page_number}`
+                  const selected = selectedBySlot[slot] === page.id
+                  return (
+                    <div className="submission-page" key={page.id}>
+                      <img src={page.signed_url} alt={`Page ${page.page_number}`} style={{ transform: `rotate(${page.rotation}deg)` }} />
+                      <div><strong>Page {page.page_number}</strong>
+                        {student?.is_owner && <button className={selected ? 'selected-page-button' : 'text-button'} disabled={busyPageId === page.id} onClick={() => void selectPage(submission, page)}>
+                          {busyPageId === page.id ? 'Saving…' : selected ? 'Selected' : 'Select for notebook'}
+                        </button>}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              {!student?.is_owner && (reportingId === submission.id ? (
+                <div className="report-form">
+                  <label>What should the owner review?<textarea value={reportReason} onChange={e => setReportReason(e.target.value)} maxLength={500} placeholder="Describe the issue" /></label>
+                  <button className="secondary-button" onClick={() => { setReportingId(null); setReportReason('') }}>Cancel</button>
+                  <button className="primary-button" disabled={!reportReason.trim()} onClick={() => void submitReport(submission.id)}>Send report</button>
+                </div>
+              ) : (
+                <button className="text-button report-button" onClick={() => setReportingId(submission.id)}>Report an issue</button>
+              ))}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state"><FolderOpen size={34} /><h3>{submissions.length ? 'No submissions match these filters' : 'No submissions yet'}</h3><p>{submissions.length ? 'Try changing the search, subject, or date.' : 'Student uploads will appear here after they are submitted.'}</p></div>
+      )}
+    </div>
+  )
+}
+
+function Contributions({ student, showToast }: { student: any; showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [submissions, setSubmissions] = useState<WorkSubmission[]>([])
+  const [loading, setLoading] = useState(true)
+  const loadContributions = useCallback(async () => {
+    if (!student?.id) return
+    setLoading(true)
+    try {
+      setSubmissions(await fetchWorkSubmissions(student.id))
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load your contributions.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [showToast, student?.id])
+
+  useEffect(() => { void loadContributions() }, [loadContributions])
+
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><p className="eyebrow">CONTRIBUTOR HISTORY</p><h1>My contributions</h1></div>
+        <button className="secondary-button" onClick={() => void loadContributions()}>Refresh</button>
+      </div>
+      {loading ? <Loading /> : submissions.length ? (
+        <div className="submission-list">
+          {submissions.map(submission => (
+            <article className="submission-card" key={submission.id}>
+              <div className="submission-heading">
+                <div><strong>{submission.task?.title || 'Untitled work'}</strong><span>{submission.task?.subjects?.name || 'Subject'} · {submission.task?.chapter || 'No chapter'} · {formatDate(submission.task?.academic_date || '')}</span></div>
+                <div className="submission-contributor">{submission.pages.length} page{submission.pages.length === 1 ? '' : 's'}</div>
+              </div>
+              <div className="submission-pages">
+                {submission.pages.map(page => <div className="submission-page" key={page.id}><img src={page.signed_url} alt={`Page ${page.page_number}`} style={{ transform: `rotate(${page.rotation}deg)` }} /><div><strong>Page {page.page_number}</strong></div></div>)}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state"><UserRound size={34} /><h3>No contributions yet</h3><p>Uploads made by {student?.display_name || 'you'} will appear here.</p></div>
+      )}
     </div>
   )
 }
@@ -861,26 +1245,31 @@ function AdminPanel({ navigate, pendingCount }: { navigate: (page: PageName) => 
           <div><strong>Student approvals</strong><span>{pendingCount} pending request{pendingCount === 1 ? '' : 's'}</span></div>
           <ChevronRight size={18} />
         </button>
-        <div className="admin-card admin-card-disabled" aria-disabled="true">
+        <button className="admin-card" onClick={() => navigate('Manage Subjects')}>
           <div className="admin-icon"><Grid2X2 size={21} /></div>
-          <div><strong>Manage subjects</strong><span>Not available yet</span></div>
-        </div>
-        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div><strong>Manage subjects</strong><span>Enable or pause class subjects</span></div>
+          <ChevronRight size={18} />
+        </button>
+        <button className="admin-card" onClick={() => navigate('All Submissions')}>
           <div className="admin-icon"><FolderOpen size={21} /></div>
-          <div><strong>Task & submission review</strong><span>Not available yet</span></div>
-        </div>
-        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div><strong>Task & submission review</strong><span>Review pages and curate the notebook</span></div>
+          <ChevronRight size={18} />
+        </button>
+        <button className="admin-card" onClick={() => navigate('Digital Notebook')}>
           <div className="admin-icon"><FileText size={21} /></div>
-          <div><strong>PDF publishing</strong><span>Not available yet</span></div>
-        </div>
-        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div><strong>PDF publishing</strong><span>Download curated subject PDFs</span></div>
+          <ChevronRight size={18} />
+        </button>
+        <button className="admin-card" onClick={() => navigate('Reports')}>
           <div className="admin-icon"><AlertTriangle size={21} /></div>
-          <div><strong>Reports</strong><span>Not available yet</span></div>
-        </div>
-        <div className="admin-card admin-card-disabled" aria-disabled="true">
+          <div><strong>Reports</strong><span>Review student-submitted reports</span></div>
+          <ChevronRight size={18} />
+        </button>
+        <button className="admin-card" onClick={() => navigate('Audit History')}>
           <div className="admin-icon"><Clock3 size={21} /></div>
-          <div><strong>Audit history</strong><span>Not available yet</span></div>
-        </div>
+          <div><strong>Audit history</strong><span>View owner curation activity</span></div>
+          <ChevronRight size={18} />
+        </button>
       </div>
     </div>
   )
@@ -936,19 +1325,12 @@ function MemberApprovals({ showToast }: { showToast: (text: string, type?: 'succ
     if (!client) return
     setBusyId(request.id)
     try {
-      const { data, error } = await client.from('students')
-        .update({ status })
-        .eq('id', request.id)
-        .eq('status', 'pending')
-        .select('id')
-        .maybeSingle()
-      if (error) {
-        showToast(error.message, 'error')
-      } else if (!data) {
-        showToast('This request was already handled. Refreshing the list.', 'error')
-      } else {
-        showToast(status === 'approved' ? `${request.display_name} approved.` : `${request.display_name} declined.`)
-      }
+      const { error } = await client.rpc('set_student_approval', {
+        p_student_id: request.id,
+        p_status: status,
+      })
+      if (error) throw error
+      showToast(status === 'approved' ? `${request.display_name} approved.` : `${request.display_name} declined.`)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not update this member request.', 'error')
     } finally {
@@ -985,6 +1367,208 @@ function MemberApprovals({ showToast }: { showToast: (text: string, type?: 'succ
         </div>
       ) : (
         <div className="empty-state"><Users size={34} /><h3>No pending member requests</h3><p>New requests will appear here and update automatically.</p></div>
+      )}
+    </div>
+  )
+}
+
+type SubjectRecord = { id: string; name: string; sort_order: number; is_active: boolean }
+
+function ManageSubjects({ student, showToast }: { student: any; showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [subjectRows, setSubjectRows] = useState<SubjectRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const loadSubjects = useCallback(async () => {
+    if (!supabase || !student?.class_id) return
+    try {
+      const { data, error } = await supabase.from('subjects')
+        .select('id,name,sort_order,is_active')
+        .eq('class_id', student.class_id)
+        .order('sort_order')
+      if (error) throw error
+      setSubjectRows(data || [])
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load subjects.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [showToast, student?.class_id])
+
+  useEffect(() => { void loadSubjects() }, [loadSubjects])
+
+  async function toggleSubject(subject: SubjectRecord) {
+    if (!supabase) return
+    setBusyId(subject.id)
+    try {
+      const { error } = await supabase.from('subjects')
+        .update({ is_active: !subject.is_active })
+        .eq('id', subject.id)
+      if (error) throw error
+      showToast(`${subject.name} ${subject.is_active ? 'paused' : 'enabled'}.`)
+      await loadSubjects()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not update this subject.', 'error')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><p className="eyebrow">OWNER ONLY</p><h1>Manage subjects</h1></div>
+        <button className="secondary-button" onClick={() => void loadSubjects()}>Refresh</button>
+      </div>
+      <p className="approval-intro">Paused subjects are hidden from new uploads. Existing work remains available.</p>
+      {loading ? <Loading /> : (
+        <div className="subject-management-list">
+          {subjectRows.map(subject => (
+            <article className="subject-management-row" key={subject.id}>
+              <div><strong>{subject.name}</strong><span>{subject.is_active ? 'Available for uploads' : 'Paused'}</span></div>
+              <button className={subject.is_active ? 'secondary-button' : 'primary-button'} disabled={busyId === subject.id} onClick={() => void toggleSubject(subject)}>
+                {busyId === subject.id ? 'Saving…' : subject.is_active ? 'Pause' : 'Enable'}
+              </button>
+            </article>
+          ))}
+          {!subjectRows.length && <div className="empty-state"><Grid2X2 size={34} /><h3>No subjects configured</h3><p>Run the class setup migration to seed subjects.</p></div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+type ReportRecord = {
+  id: string
+  submission_id: string
+  reporter_id: string
+  reason: string
+  status: 'open' | 'reviewed' | 'resolved'
+  created_at: string
+}
+
+function ReportsView({ student, showToast }: { student: any; showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [reports, setReports] = useState<ReportRecord[]>([])
+  const [submissions, setSubmissions] = useState<WorkSubmission[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const loadReports = useCallback(async () => {
+    if (!supabase) return
+    setLoading(true)
+    try {
+      const [{ data, error }, work] = await Promise.all([
+        supabase.from('reports').select('id,submission_id,reporter_id,reason,status,created_at').order('created_at', { ascending: false }),
+        fetchWorkSubmissions(),
+      ])
+      if (error) throw error
+      setReports(data || [])
+      setSubmissions(work)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load reports.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [showToast])
+
+  useEffect(() => { void loadReports() }, [loadReports])
+
+  async function updateReport(report: ReportRecord, status: 'reviewed' | 'resolved') {
+    if (!supabase) return
+    setBusyId(report.id)
+    try {
+      const { error } = await supabase.from('reports')
+        .update({ status, reviewed_by: student.id })
+        .eq('id', report.id)
+      if (error) throw error
+      showToast(status === 'resolved' ? 'Report resolved.' : 'Report marked reviewed.')
+      await loadReports()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not update this report.', 'error')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const submissionById = new Map(submissions.map(submission => [submission.id, submission]))
+
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><p className="eyebrow">OWNER ONLY</p><h1>Student reports</h1></div>
+        <button className="secondary-button" onClick={() => void loadReports()}>Refresh</button>
+      </div>
+      {loading ? <Loading /> : reports.length ? (
+        <div className="report-list">
+          {reports.map(report => {
+            const submission = submissionById.get(report.submission_id)
+            return (
+              <article className="report-card" key={report.id}>
+                <div><span className={`status-pill ${report.status}`}>{report.status}</span><small>{new Date(report.created_at).toLocaleString()}</small></div>
+                <strong>{submission?.task?.title || 'Submission unavailable'}</strong>
+                <p>{report.reason}</p>
+                {submission && <span>{submission.contributor?.display_name || 'Student'} · Roll {submission.contributor?.roll_number || '—'}</span>}
+                <div className="report-actions">
+                  {report.status === 'open' && <button className="secondary-button" disabled={busyId === report.id} onClick={() => void updateReport(report, 'reviewed')}>Mark reviewed</button>}
+                  {report.status !== 'resolved' && <button className="primary-button" disabled={busyId === report.id} onClick={() => void updateReport(report, 'resolved')}>{busyId === report.id ? 'Saving…' : 'Resolve'}</button>}
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="empty-state"><AlertTriangle size={34} /><h3>No student reports</h3><p>Reports submitted from the All Submissions section will appear here.</p></div>
+      )}
+    </div>
+  )
+}
+
+type AuditRecord = {
+  id: string
+  actor_id: string
+  action: string
+  entity_type: string
+  entity_id: string | null
+  created_at: string
+}
+
+function AuditHistory({ showToast }: { showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [records, setRecords] = useState<AuditRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const loadRecords = useCallback(async () => {
+    if (!supabase) return
+    try {
+      const { data, error } = await supabase.from('audit_logs')
+        .select('id,actor_id,action,entity_type,entity_id,created_at')
+        .order('created_at', { ascending: false })
+        .limit(100)
+      if (error) throw error
+      setRecords(data || [])
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not load audit history.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [showToast])
+  useEffect(() => { void loadRecords() }, [loadRecords])
+
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><p className="eyebrow">OWNER ONLY</p><h1>Audit history</h1></div>
+        <button className="secondary-button" onClick={() => void loadRecords()}>Refresh</button>
+      </div>
+      {loading ? <Loading /> : records.length ? (
+        <div className="audit-list">
+          {records.map(record => (
+            <article className="audit-row" key={record.id}>
+              <div><strong>{record.action.replaceAll('_', ' ')}</strong><span>{record.entity_type.replaceAll('_', ' ')}{record.entity_id ? ` · ${record.entity_id}` : ''}</span></div>
+              <small>{new Date(record.created_at).toLocaleString()}</small>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state"><Clock3 size={34} /><h3>No audit events yet</h3><p>Owner curation activity will be recorded here.</p></div>
       )}
     </div>
   )
