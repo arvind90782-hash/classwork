@@ -372,7 +372,7 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast, onJoined }:
     <div className="auth-screen">
       <section className="auth-art">
         <div className="auth-brand"><div className="brand-mark"><BookOpen size={22} /></div><strong>Classwork</strong></div>
-        <div className="auth-art-copy"><span>CLASS 5 · PRIVATE WORKSPACE</span><h1>Your class notes,<br />carefully organised.</h1><p>A secure digital notebook for daily school work and complete class submissions.</p></div>
+        <div className="auth-art-copy"><h1>Your class notes,<br />carefully organised.</h1><p>A secure digital notebook for daily school work and complete class submissions.</p></div>
       </section>
       <section className="auth-form-section">
         <form className="auth-form" onSubmit={submitAuth}>
