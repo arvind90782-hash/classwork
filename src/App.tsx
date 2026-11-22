@@ -1357,11 +1357,12 @@ function SubmissionsView({ student, showToast }: { student: any; showToast: (tex
   const [busyPageId, setBusyPageId] = useState<string | null>(null)
   const [reportingId, setReportingId] = useState<string | null>(null)
   const [reportReason, setReportReason] = useState('')
+  const [busySubmissionId, setBusySubmissionId] = useState<string | null>(null)
 
   const loadSubmissions = useCallback(async () => {
     setLoading(true)
     try {
-      const work = await fetchWorkSubmissions()
+      const work = await fetchWorkSubmissions(undefined, student?.is_owner)
       setSubmissions(work)
       if (student?.is_owner && supabase) {
         const { data, error } = await supabase.from('notebook_page_selections')
@@ -1440,6 +1441,25 @@ function SubmissionsView({ student, showToast }: { student: any; showToast: (tex
     }
   }
 
+  async function reviewSubmission(submissionId: string, status: 'approved' | 'rejected') {
+    if (!supabase || !student?.is_owner) return
+    setBusySubmissionId(submissionId)
+    try {
+      const { error } = await supabase.rpc('review_submission', {
+        p_submission_id: submissionId,
+        p_status: status,
+        p_review_notes: null,
+      })
+      if (error) throw error
+      showToast(status === 'approved' ? 'Submission approved.' : 'Submission rejected.')
+      await loadSubmissions()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not review this submission.', 'error')
+    } finally {
+      setBusySubmissionId(null)
+    }
+  }
+
   return (
     <div className="page">
       <div className="page-heading">
@@ -1457,7 +1477,10 @@ function SubmissionsView({ student, showToast }: { student: any; showToast: (tex
             <article className="submission-card" key={submission.id}>
               <div className="submission-heading">
                 <div><strong>{submission.task?.title || 'Untitled work'}</strong><span>{submission.task?.subjects?.name || 'Subject'} · {submission.task?.chapter || 'No chapter'} · {formatDate(submission.task?.academic_date || '')}</span></div>
-                <div className="submission-contributor">{submission.contributor?.display_name || 'Student'} · Roll {submission.contributor?.roll_number || '—'}</div>
+                <div className="submission-contributor">
+                  {submission.contributor?.display_name || 'Student'} · Roll {submission.contributor?.roll_number || '—'}
+                  <span className={`status-pill ${submission.approval_status}`}>{submission.approval_status.replaceAll('_', ' ')}</span>
+                </div>
               </div>
               {submission.notes && <p className="submission-notes">{submission.notes}</p>}
               <div className="submission-pages">
@@ -1476,6 +1499,24 @@ function SubmissionsView({ student, showToast }: { student: any; showToast: (tex
                   )
                 })}
               </div>
+              {student?.is_owner && (
+                <div className="approval-actions">
+                  <button
+                    className="secondary-button"
+                    disabled={busySubmissionId === submission.id || submission.approval_status === 'rejected'}
+                    onClick={() => void reviewSubmission(submission.id, 'rejected')}
+                  >
+                    {busySubmissionId === submission.id ? 'Saving…' : 'Reject'}
+                  </button>
+                  <button
+                    className="primary-button"
+                    disabled={busySubmissionId === submission.id || submission.approval_status === 'approved'}
+                    onClick={() => void reviewSubmission(submission.id, 'approved')}
+                  >
+                    {busySubmissionId === submission.id ? 'Saving…' : 'Approve'}
+                  </button>
+                </div>
+              )}
               {!student?.is_owner && (reportingId === submission.id ? (
                 <div className="report-form">
                   <label>What should the owner review?<textarea value={reportReason} onChange={e => setReportReason(e.target.value)} maxLength={500} placeholder="Describe the issue" /></label>
@@ -1502,7 +1543,7 @@ function Contributions({ student, showToast }: { student: any; showToast: (text:
     if (!student?.id) return
     setLoading(true)
     try {
-      setSubmissions(await fetchWorkSubmissions(student.id))
+      setSubmissions(await fetchWorkSubmissions(student.id, true))
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not load your contributions.', 'error')
     } finally {

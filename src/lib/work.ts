@@ -28,6 +28,9 @@ export type WorkSubmission = {
   uploaded_at: string
   notes: string | null
   is_hidden: boolean
+  approval_status: 'pending_review' | 'approved' | 'rejected' | 'archived'
+  review_notes: string | null
+  reviewed_at: string | null
   task: WorkTask | null
   contributor: { id: string; display_name: string; roll_number: string } | null
   pages: WorkPage[]
@@ -75,14 +78,15 @@ export type ClassDocument = {
   pages: ClassDocumentPage[]
 }
 
-export async function fetchWorkSubmissions(contributorId?: string): Promise<WorkSubmission[]> {
+export async function fetchWorkSubmissions(contributorId?: string, includeAll = false): Promise<WorkSubmission[]> {
   const client = supabase
   if (!client) throw new Error('Supabase is not configured.')
 
   let query = client.from('submissions')
-    .select('id,task_id,contributor_id,uploaded_at,notes,is_hidden,submission_pages(id,page_number,storage_path,mime_type,rotation)')
+    .select('id,task_id,contributor_id,uploaded_at,notes,is_hidden,approval_status,review_notes,reviewed_at,submission_pages(id,page_number,storage_path,mime_type,rotation)')
     .order('uploaded_at', { ascending: false })
   if (contributorId) query = query.eq('contributor_id', contributorId)
+  if (!includeAll) query = query.eq('approval_status', 'approved')
   const { data: rows, error } = await query
   if (error) throw error
   if (!rows?.length) return []

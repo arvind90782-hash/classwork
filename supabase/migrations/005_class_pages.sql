@@ -113,7 +113,5 @@ create policy "approved upload own class document objects" on storage.objects
         and d.uploaded_by = auth.uid()
         and s.class_id = d.class_id
         and s.status = 'approved'
-        and split_part(class_document_pages.storage_path, '/', 1) = d.class_id::text
-        and split_part(class_document_pages.storage_path, '/', 2) = d.id::text
     )
   );
