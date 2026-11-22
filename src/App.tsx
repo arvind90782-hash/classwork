@@ -25,7 +25,7 @@ const subjects = [
 
 type PageName = 'Dashboard' | 'Daily Work' | 'Upload Work' | 'Digital Notebook' |
   'All Submissions' | 'My Contributions' | 'Admin Panel' | 'Member Approvals' |
-  'Manage Subjects' | 'Reports' | 'Audit History' | 'Class Pages' | 'Settings'
+  'Manage Subjects' | 'Reports' | 'Audit History' | 'Class Pages' | 'Settings' | 'Admin Settings'
 
 type TaskRow = {
   id: string
@@ -59,8 +59,30 @@ const navItems: { label: PageName; icon: typeof Home }[] = [
   { label: 'My Contributions', icon: FileText },
   { label: 'Admin Panel', icon: ShieldCheck },
   { label: 'Member Approvals', icon: Users },
+  { label: 'Admin Settings', icon: Settings },
   { label: 'Settings', icon: Settings },
 ]
+
+const pagePaths: Record<PageName, string> = {
+  Dashboard: '/dashboard',
+  'Daily Work': '/daily-work',
+  'Upload Work': '/upload',
+  'Digital Notebook': '/notebook',
+  'All Submissions': '/submissions',
+  'My Contributions': '/contributions',
+  'Admin Panel': '/admin',
+  'Member Approvals': '/admin/member-approvals',
+  'Manage Subjects': '/admin/subjects',
+  Reports: '/admin/reports',
+  'Audit History': '/admin/audit',
+  'Class Pages': '/class-pages',
+  Settings: '/settings',
+  'Admin Settings': '/admin/settings',
+}
+
+function pageFromPath(pathname: string): PageName {
+  return (Object.entries(pagePaths).find(([, path]) => path === pathname)?.[0] as PageName) || 'Dashboard'
+}
 
 function todayKolkata() {
   return new Intl.DateTimeFormat('en-CA', {
@@ -77,7 +99,7 @@ function formatDate(date: string) {
 }
 
 function App() {
-  const [page, setPage] = useState<PageName>('Dashboard')
+  const [page, setPage] = useState<PageName>(() => pageFromPath(window.location.pathname))
   const [mobileMenu, setMobileMenu] = useState(false)
   const [selectedDate, setSelectedDate] = useState(todayKolkata())
   const [session, setSession] = useState<any>(null)
@@ -91,6 +113,7 @@ function App() {
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [profileRefreshVersion, setProfileRefreshVersion] = useState(0)
   const loadRequestId = useRef(0)
+  const loggedSessionId = useRef<string | null>(null)
 
   const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
     setToast({ text, type })
@@ -109,6 +132,17 @@ function App() {
       if (profileError) throw profileError
       if (requestId !== loadRequestId.current) return
       setStudent(profile)
+      if (profile) {
+        const { data: preference } = await client
+          .from('user_preferences').select('theme,accessibility_reduced_motion').eq('user_id', userId).maybeSingle()
+        if (preference) {
+          const resolvedTheme = preference.theme === 'system'
+            ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+            : preference.theme
+          document.documentElement.dataset.theme = resolvedTheme
+          document.documentElement.style.scrollBehavior = preference.accessibility_reduced_motion ? 'auto' : 'smooth'
+        }
+      }
       if (profile?.status === 'approved') {
         const { data, error } = await client.from('tasks')
           .select('id,title,academic_date,status,chapter,exercise,subjects(name)')
@@ -131,12 +165,36 @@ function App() {
   }, [userId, selectedDate, showToast])
 
   useEffect(() => {
-    if (!supabase) return
-    supabase.auth.getSession().then(({ data }) => setSession(data.session))
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const client = supabase
+    if (!client) return
+    client.auth.getSession().then(({ data }) => setSession(data.session))
+    const { data: { subscription } } = client.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession)
+      if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && nextSession) {
+        const sessionKey = nextSession.access_token
+        if (loggedSessionId.current !== sessionKey) {
+          loggedSessionId.current = sessionKey
+          void client.rpc('log_activity', {
+            p_action: event === 'SIGNED_IN' ? 'signed_in' : 'session_refreshed',
+            p_entity_type: 'authentication',
+            p_metadata: {
+              route: window.location.pathname,
+              user_agent: navigator.userAgent,
+            },
+          })
+        }
+      }
     })
     return () => subscription.unsubscribe()
+  }, [])
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setPage(pageFromPath(window.location.pathname))
+      setMobileMenu(false)
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
   useEffect(() => {
@@ -145,6 +203,13 @@ function App() {
 
   async function signOut() {
     try {
+      if (supabase) {
+        await supabase.rpc('log_activity', {
+          p_action: 'signed_out',
+          p_entity_type: 'authentication',
+          p_metadata: { route: window.location.pathname, user_agent: navigator.userAgent },
+        })
+      }
       const { error } = await supabase!.auth.signOut()
       if (error) throw error
       setSession(null)
@@ -157,6 +222,8 @@ function App() {
   }
 
   const navigate = (next: PageName) => {
+    const path = pagePaths[next]
+    if (window.location.pathname !== path) window.history.pushState({ page: next }, '', path)
     setPage(next)
     setMobileMenu(false)
     setNotificationsOpen(false)
@@ -243,7 +310,13 @@ function App() {
         </div>
         <nav className="main-nav" aria-label="Main navigation">
           {navItems.map(item => {
-            if ((item.label === 'Admin Panel' || item.label === 'Member Approvals') && !student?.is_owner) return null
+            const ownerOnly = item.label === 'Admin Panel'
+              || item.label === 'Member Approvals'
+              || item.label === 'Manage Subjects'
+              || item.label === 'Reports'
+              || item.label === 'Audit History'
+              || item.label === 'Admin Settings'
+            if (ownerOnly && !student?.is_owner) return null
             const Icon = item.icon
             return (
               <button key={item.label} className={page === item.label ? 'active' : ''} onClick={() => navigate(item.label)}>
@@ -300,7 +373,8 @@ function App() {
           page === 'Manage Subjects' && student?.is_owner ? <ManageSubjects student={student} showToast={showToast} /> :
           page === 'Reports' && student?.is_owner ? <ReportsView student={student} showToast={showToast} /> :
           page === 'Audit History' && student?.is_owner ? <AuditHistory showToast={showToast} /> :
-          page === 'Settings' ? <SettingsView student={student} /> :
+          page === 'Settings' ? <SettingsView student={student} showToast={showToast} /> :
+          page === 'Admin Settings' && student?.is_owner ? <AdminSettingsView student={student} showToast={showToast} /> :
           <Dashboard date={selectedDate} tasks={tasks} navigate={navigate} student={student} showToast={showToast} />}
       </main>
       {toast && <div className={`toast ${toast.type}`}>{toast.type === 'success' ? <Check size={17} /> : <AlertTriangle size={17} />}{toast.text}</div>}
@@ -466,8 +540,13 @@ function JoinScreen({ onJoined, showToast, onLogout }: any) {
 
 function Loading() {
   return (
-    <div className="loading-wrap">
-      <div className="spinner" /><span>Loading workspace…</span>
+    <div className="skeleton-page" role="status" aria-label="Loading workspace">
+      <div className="skeleton-line wide" />
+      <div className="skeleton-grid">
+        <div className="skeleton-card" /><div className="skeleton-card" /><div className="skeleton-card" />
+      </div>
+      <div className="skeleton-line" /><div className="skeleton-line short" />
+      <span className="sr-only">Loading workspace…</span>
     </div>
   )
 }
@@ -1874,21 +1953,33 @@ type AuditRecord = {
   action: string
   entity_type: string
   entity_id: string | null
+  old_value: Record<string, unknown> | null
+  new_value: Record<string, unknown> | null
   created_at: string
 }
 
 function AuditHistory({ showToast }: { showToast: (text: string, type?: 'success' | 'error') => void }) {
   const [records, setRecords] = useState<AuditRecord[]>([])
+  const [actors, setActors] = useState<Record<string, { display_name: string; roll_number: string; is_owner: boolean }>>({})
+  const [search, setSearch] = useState('')
+  const [actionFilter, setActionFilter] = useState('')
   const [loading, setLoading] = useState(true)
   const loadRecords = useCallback(async () => {
     if (!supabase) return
     try {
       const { data, error } = await supabase.from('audit_logs')
-        .select('id,actor_id,action,entity_type,entity_id,created_at')
+        .select('id,actor_id,action,entity_type,entity_id,old_value,new_value,created_at')
         .order('created_at', { ascending: false })
-        .limit(100)
+        .limit(200)
       if (error) throw error
-      setRecords(data || [])
+      const rows = (data || []) as AuditRecord[]
+      const actorIds = [...new Set(rows.map(row => row.actor_id))]
+      const { data: actors } = await supabase.from('students')
+        .select('id,display_name,roll_number,is_owner')
+        .in('id', actorIds)
+      const actorById = new Map((actors || []).map(actor => [actor.id, actor]))
+      setActors(Object.fromEntries(actorById))
+      setRecords(rows)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not load audit history.', 'error')
     } finally {
@@ -1897,17 +1988,35 @@ function AuditHistory({ showToast }: { showToast: (text: string, type?: 'success
   }, [showToast])
   useEffect(() => { void loadRecords() }, [loadRecords])
 
+  const actionOptions = [...new Set(records.map(record => record.action))]
+  const visibleRecords = records.filter(record => {
+    const actor = actors[record.actor_id]
+    const text = `${record.action} ${record.entity_type} ${record.entity_id || ''} ${actor?.display_name || ''} ${actor?.roll_number || ''} ${JSON.stringify(record.new_value || {})}`.toLowerCase()
+    return (!actionFilter || record.action === actionFilter) && text.includes(search.toLowerCase())
+  })
   return (
     <div className="page">
       <div className="page-heading">
         <div><p className="eyebrow">OWNER ONLY</p><h1>Audit history</h1></div>
         <button className="secondary-button" onClick={() => void loadRecords()}>Refresh</button>
       </div>
-      {loading ? <Loading /> : records.length ? (
+      <div className="filter-bar">
+        <div className="search-box large"><Search size={16} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search actor, action or details" /></div>
+        <select value={actionFilter} onChange={event => setActionFilter(event.target.value)} aria-label="Filter audit action">
+          <option value="">All activities</option>
+          {actionOptions.map(action => <option key={action} value={action}>{action.replaceAll('_', ' ')}</option>)}
+        </select>
+      </div>
+      {loading ? <Loading /> : visibleRecords.length ? (
         <div className="audit-list">
-          {records.map(record => (
+          {visibleRecords.map(record => (
             <article className="audit-row" key={record.id}>
-              <div><strong>{record.action.replaceAll('_', ' ')}</strong><span>{record.entity_type.replaceAll('_', ' ')}{record.entity_id ? ` · ${record.entity_id}` : ''}</span></div>
+              <div>
+                <strong>{record.action.replaceAll('_', ' ')}</strong>
+                <span>{actors[record.actor_id]?.display_name || 'Unknown account'} · Roll {actors[record.actor_id]?.roll_number || '—'} · {actors[record.actor_id]?.is_owner ? 'Owner' : 'Student'}</span>
+                <span>{record.entity_type.replaceAll('_', ' ')}{record.entity_id ? ` · ${record.entity_id}` : ''}</span>
+                {(record.old_value || record.new_value) && <pre className="audit-details">{JSON.stringify({ old: record.old_value, new: record.new_value }, null, 2)}</pre>}
+              </div>
               <small>{new Date(record.created_at).toLocaleString()}</small>
             </article>
           ))}
@@ -1919,10 +2028,93 @@ function AuditHistory({ showToast }: { showToast: (text: string, type?: 'success
   )
 }
 
-function SettingsView({ student }: any) {
+function SettingsSkeleton() {
+  return (
+    <div className="settings-skeleton" role="status" aria-label="Loading settings">
+      <div className="skeleton-line wide" />
+      <div className="settings-skeleton-grid"><div /><div /></div>
+      <div className="skeleton-line" /><div className="skeleton-line short" />
+    </div>
+  )
+}
+
+function SettingsView({ student, showToast }: { student: any; showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system')
+  const [defaultSubjectId, setDefaultSubjectId] = useState('')
+  const [subjects, setSubjects] = useState<Array<{ id: string; name: string }>>([])
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true)
+  const [emailNotifications, setEmailNotifications] = useState(false)
+  const [compactView, setCompactView] = useState(false)
+  const [reducedMotion, setReducedMotion] = useState(false)
+  const [language, setLanguage] = useState('en')
+  const [saving, setSaving] = useState(false)
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    if (!supabase || !student?.id) return
+    void (async () => {
+      try {
+        const [{ data: preference }, { data: subjectRows }] = await Promise.all([
+          supabase.from('user_preferences').select('*').eq('user_id', student.id).maybeSingle(),
+          supabase.from('subjects').select('id,name').eq('class_id', student.class_id).eq('is_active', true).order('sort_order'),
+        ])
+        setSubjects(subjectRows || [])
+        if (preference) {
+          setTheme(preference.theme)
+          setDefaultSubjectId(preference.default_subject_id || '')
+          setNotificationsEnabled(preference.notifications_enabled)
+          setEmailNotifications(preference.email_notifications)
+          setCompactView(preference.compact_view)
+          setReducedMotion(preference.accessibility_reduced_motion)
+          setLanguage(preference.language)
+        }
+      } finally {
+        setReady(true)
+      }
+    })()
+  }, [student?.id, student?.class_id])
+
+  useEffect(() => {
+    const resolvedTheme = theme === 'system'
+      ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : theme
+    document.documentElement.dataset.theme = resolvedTheme
+    document.documentElement.style.scrollBehavior = reducedMotion ? 'auto' : 'smooth'
+  }, [theme, reducedMotion])
+
+  async function savePreferences() {
+    if (!supabase || !student?.id) return
+    setSaving(true)
+    try {
+      const { error } = await supabase.from('user_preferences').upsert({
+        user_id: student.id,
+        theme,
+        default_subject_id: defaultSubjectId || null,
+        notifications_enabled: notificationsEnabled,
+        email_notifications: emailNotifications,
+        compact_view: compactView,
+        accessibility_reduced_motion: reducedMotion,
+        language,
+        updated_at: new Date().toISOString(),
+      })
+      if (error) throw error
+      await supabase.rpc('log_activity', {
+        p_action: 'updated_personal_preferences',
+        p_entity_type: 'user_preferences',
+        p_metadata: { theme, default_subject_id: defaultSubjectId || null, notifications_enabled: notificationsEnabled, compact_view: compactView, language },
+      })
+      showToast('Personal settings saved.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save personal settings.', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="page">
       <div className="page-heading"><div><p className="eyebrow">ACCOUNT</p><h1>Settings</h1></div></div>
+      {!ready ? <SettingsSkeleton /> : (
       <section className="settings-card">
         <h2>Student identity</h2>
         <div className="form-row">
@@ -1930,7 +2122,125 @@ function SettingsView({ student }: any) {
           <label>Roll number<input value={student?.roll_number || ''} readOnly /></label>
         </div>
         <div className="settings-note"><ShieldCheck size={17} /><span>Name and roll number can only be changed by the class owner.</span></div>
+        <h2 className="settings-section-title">Personal preferences</h2>
+        <div className="form-row">
+          <label>Theme
+            <select value={theme} onChange={event => setTheme(event.target.value as 'light' | 'dark' | 'system')}>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+              <option value="system">System</option>
+            </select>
+          </label>
+          <label>Default subject
+            <select value={defaultSubjectId} onChange={event => setDefaultSubjectId(event.target.value)}>
+              <option value="">Last used / no preference</option>
+              {subjects.map(subject => <option key={subject.id} value={subject.id}>{subject.name}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="form-row">
+          <label>Language<select value={language} onChange={event => setLanguage(event.target.value)}><option value="en">English</option><option value="hi">Hindi</option></select></label>
+          <label>&nbsp;<span className="settings-toggle"><input type="checkbox" checked={compactView} onChange={event => setCompactView(event.target.checked)} /> Compact view</span></label>
+        </div>
+        <div className="settings-toggle-list">
+          <label><input type="checkbox" checked={notificationsEnabled} onChange={event => setNotificationsEnabled(event.target.checked)} /> In-app notifications</label>
+          <label><input type="checkbox" checked={emailNotifications} onChange={event => setEmailNotifications(event.target.checked)} /> Email notifications when configured</label>
+          <label><input type="checkbox" checked={reducedMotion} onChange={event => setReducedMotion(event.target.checked)} /> Reduce motion</label>
+        </div>
+        <button className="primary-button" disabled={saving} onClick={() => void savePreferences()}>{saving ? 'Saving…' : 'Save personal settings'}</button>
       </section>
+      )}
+    </div>
+  )
+}
+
+function AdminSettingsView({ student, showToast }: { student: any; showToast: (text: string, type?: 'success' | 'error') => void }) {
+  const [className, setClassName] = useState('Class 5')
+  const [academicYear, setAcademicYear] = useState('2026-2027')
+  const [maintenanceMode, setMaintenanceMode] = useState(false)
+  const [approvalRequired, setApprovalRequired] = useState(true)
+  const [uploadLimitMb, setUploadLimitMb] = useState(15)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (!supabase || !student?.class_id) return
+    void (async () => {
+      try {
+        const [{ data: classRow }, { data: settings }] = await Promise.all([
+          supabase.from('classes').select('name').eq('id', student.class_id).single(),
+          supabase.from('admin_settings').select('key,value').eq('class_id', student.class_id),
+        ])
+        if (classRow) setClassName(classRow.name)
+        for (const setting of settings || []) {
+          if (setting.key === 'academic_year') setAcademicYear(String(setting.value?.value || '2026-2027'))
+          if (setting.key === 'maintenance_mode') setMaintenanceMode(Boolean(setting.value?.value))
+          if (setting.key === 'approval_required') setApprovalRequired(Boolean(setting.value?.value))
+          if (setting.key === 'upload_limit_mb') setUploadLimitMb(Number(setting.value?.value || 15))
+        }
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : 'Could not load admin settings.', 'error')
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [showToast, student?.class_id])
+
+  async function saveSetting(key: string, value: unknown) {
+    if (!supabase) return
+    const { error } = await supabase.rpc('save_admin_setting', {
+      p_key: key,
+      p_value: { value },
+    })
+    if (error) throw error
+  }
+
+  async function saveAdminSettings() {
+    if (!supabase || !student?.class_id) return
+    setSaving(true)
+    try {
+      const { error: classError } = await supabase.from('classes')
+        .update({ name: className.trim() || 'Class 5' })
+        .eq('id', student.class_id)
+      if (classError) throw classError
+      await saveSetting('academic_year', academicYear)
+      await saveSetting('maintenance_mode', maintenanceMode)
+      await saveSetting('approval_required', approvalRequired)
+      await saveSetting('upload_limit_mb', Math.max(1, Math.min(50, uploadLimitMb)))
+      await supabase.rpc('log_activity', {
+        p_action: 'updated_admin_settings',
+        p_entity_type: 'admin_settings',
+        p_metadata: { class_name: className.trim(), academic_year: academicYear, maintenance_mode: maintenanceMode, approval_required: approvalRequired, upload_limit_mb: uploadLimitMb },
+      })
+      showToast('Admin settings saved.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save admin settings.', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="page">
+      <div className="page-heading"><div><p className="eyebrow">OWNER ONLY</p><h1>Admin settings</h1></div></div>
+      {loading ? <SettingsSkeleton /> : (
+        <section className="settings-card">
+          <h2>Platform controls</h2>
+          <div className="form-row">
+            <label>Class name<input value={className} onChange={event => setClassName(event.target.value)} maxLength={80} /></label>
+            <label>Academic year<input value={academicYear} onChange={event => setAcademicYear(event.target.value)} placeholder="2026-2027" /></label>
+          </div>
+          <div className="form-row">
+            <label>Upload limit (MB)<input type="number" min={1} max={50} value={uploadLimitMb} onChange={event => setUploadLimitMb(Number(event.target.value))} /></label>
+            <label>&nbsp;<span className="settings-toggle"><input type="checkbox" checked={approvalRequired} onChange={event => setApprovalRequired(event.target.checked)} /> Require submission approval</span></label>
+          </div>
+          <div className="settings-toggle-list">
+            <label><input type="checkbox" checked={maintenanceMode} onChange={event => setMaintenanceMode(event.target.checked)} /> Maintenance mode</label>
+          </div>
+          <div className="settings-note"><ShieldCheck size={17} /><span>These controls are database-backed and restricted to the owner. Maintenance mode currently records state for future enforcement.</span></div>
+          <button className="primary-button" disabled={saving} onClick={() => void saveAdminSettings()}>{saving ? 'Saving…' : 'Save admin settings'}</button>
+        </section>
+      )}
     </div>
   )
 }
