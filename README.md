@@ -5,17 +5,17 @@ A private Class 5 digital notebook built with React, TypeScript, Tailwind CSS, S
 ## Supabase setup
 
 1. Create a Supabase project.
-2. In the Supabase SQL editor, run `supabase/migrations/001_classwork.sql` for a new project. For an existing installation, also run each newer migration in order, including `002_submission_upload_policies.sql`, `003_member_approval_realtime.sql`, `004_workflow_integrity.sql`, `005_class_pages.sql`, `006_submission_approval_lifecycle.sql`, and `007_preferences_routes_audit.sql`.
-3. In **Authentication**, enable Email/password sign-in.
-4. Create `.env.local` from `.env.example` and set:
+2. Before changing an existing project, make and verify both a PostgreSQL backup and a Storage object backup. Never reset the database to install this application.
+3. On a new project, apply every file in `supabase/migrations/` in numeric order, from `001_classwork.sql` through `007_preferences_routes_audit.sql`. On an existing project, first inspect its migration history and schema; apply only migrations that have not already run, in order, and review their effects before execution. Never rerun the base migration on an existing database. Do not stop at migration 001: later migrations replace its initial owner-join implementation and add required policies and workflow tables.
+4. In **Authentication**, enable Email/password sign-in.
+5. Create `.env.local` from `.env.example` and set:
 
 ```text
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your-public-anon-key
-VITE_OWNER_EMAIL=owner@example.com
 ```
 
-5. Set the private class invite code. Replace the placeholder with a private code you have not shared publicly:
+6. Set the private class invite code. Replace the placeholder with a private code you have not shared publicly:
 
 ```sql
 update public.classes
@@ -25,7 +25,7 @@ where name = 'Class 5';
 
 The migrations seed any missing default Class 5 subjects without re-enabling subjects the owner has paused.
 
-6. Create the owner account through the app or Supabase Auth, then set ownership explicitly:
+7. Create the owner account through the app or Supabase Auth, then set ownership explicitly:
 
 ```sql
 update public.students

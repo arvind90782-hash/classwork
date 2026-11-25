@@ -113,7 +113,6 @@ function App() {
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [profileRefreshVersion, setProfileRefreshVersion] = useState(0)
   const loadRequestId = useRef(0)
-  const loggedSessionId = useRef<string | null>(null)
 
   const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
     setToast({ text, type })
@@ -170,19 +169,13 @@ function App() {
     client.auth.getSession().then(({ data }) => setSession(data.session))
     const { data: { subscription } } = client.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession)
-      if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && nextSession) {
-        const sessionKey = nextSession.access_token
-        if (loggedSessionId.current !== sessionKey) {
-          loggedSessionId.current = sessionKey
-          void client.rpc('log_activity', {
-            p_action: event === 'SIGNED_IN' ? 'signed_in' : 'session_refreshed',
-            p_entity_type: 'authentication',
-            p_metadata: {
-              route: window.location.pathname,
-              user_agent: navigator.userAgent,
-            },
-          })
-        }
+      if (event === 'SIGNED_IN' && nextSession) {
+        // Keep the audit event to the authentication action; do not record
+        // browsing routes, browser fingerprints, or session tokens.
+        void client.rpc('log_activity', {
+          p_action: 'signed_in',
+          p_entity_type: 'authentication',
+        })
       }
     })
     return () => subscription.unsubscribe()
@@ -203,13 +196,7 @@ function App() {
 
   async function signOut() {
     try {
-      if (supabase) {
-        await supabase.rpc('log_activity', {
-          p_action: 'signed_out',
-          p_entity_type: 'authentication',
-          p_metadata: { route: window.location.pathname, user_agent: navigator.userAgent },
-        })
-      }
+      // Sign-out must not depend on the optional audit write succeeding.
       const { error } = await supabase!.auth.signOut()
       if (error) throw error
       setSession(null)
@@ -446,7 +433,7 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast, onJoined }:
     <div className="auth-screen">
       <section className="auth-art">
         <div className="auth-brand"><div className="brand-mark"><BookOpen size={22} /></div><strong>Classwork</strong></div>
-        <div className="auth-art-copy"><h1>Your class notes,<br />carefully organised.</h1><p>A secure digital notebook for daily school work and complete class submissions.</p></div>
+        <div className="auth-art-copy"><h1>Your class notes,<br />carefully organised.</h1><p>A digital notebook for organising daily school work and class submissions.</p></div>
       </section>
       <section className="auth-form-section">
         <form className="auth-form" onSubmit={submitAuth}>
@@ -465,6 +452,7 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast, onJoined }:
           <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={6} placeholder="At least 6 characters" /></label>
           <button className="primary-button" disabled={loading}>{loading ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Request access'}</button>
           <small><ShieldCheck size={14} /> Private workspace · Class 5 only</small>
+          <p className="settings-note">Classwork is an independent student-maintained project. It is not an official Kendriya Vidyalaya website and is not endorsed by the school.</p>
         </form>
       </section>
     </div>
