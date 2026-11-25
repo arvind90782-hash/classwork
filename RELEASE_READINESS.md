@@ -73,3 +73,21 @@ The repository has no analytics integration, advertising pixel, explicit cookie 
 6. Resolve lint warnings, enforce each admin setting end to end, verify the production deployment commit/configuration, and complete the required review gates before considering merge or launch.
 
 No production migration, database write, Storage change, push, merge, or deployment was performed during this review.
+
+## Staging and backend verification attempt (2026-11-25)
+
+**Outcome: blocked before staging could be provisioned.** This workspace has no Supabase CLI, Docker, `psql`, or `pg_dump`; no Supabase access-token file or connected Supabase administration tool is available. The ignored local environment file contains only the public frontend configuration names (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `VITE_OWNER_EMAIL`). It does not provide an authenticated database connection or a separate staging project. No secret values were printed or copied.
+
+| Requested verification | Result and evidence | Severity if left unresolved |
+|---|---|---|
+| Provision isolated staging and authenticate read-only to actual Supabase | Not performed: no Supabase administration credential/session or project-management tool is available. The frontend anon key is not authenticated project access. | **Critical blocker** |
+| Verify applied migration versions, tables, relationships, grants, RLS, and three buckets | Not performed against either project. Local SQL files are design evidence only; there is no database connection or migration history output. | **Critical blocker** |
+| Count production records and Storage objects | Not performed. Production records and objects remain unqueried. | **Critical blocker** |
+| Create PostgreSQL and object-level Storage backups | Not attempted: `pg_dump`, authenticated Supabase Storage access, and a backup destination are unavailable. No backup is claimed. | **Critical blocker** |
+| Restore database and Storage backups in staging | Not performed because neither a backup nor staging exists. | **Critical blocker** |
+| Run migrations 001–007 in isolated staging | Not performed. `001_classwork.sql` is not safe to rerun on an existing installation; staging must be a separate disposable project/database and all migration outcomes must be captured there. | **High blocker** |
+| Verify each subject library and student/owner permissions | Not performed against data. No staging identities or authenticated sessions are available. Static source inspection is insufficient evidence. | **High blocker** |
+| Identify persisted/security behavior bugs | The known source-level concerns and product gaps above remain unverified against the live schema/policies. No new backend vulnerability is claimed as confirmed. | **High blocker** |
+| Add automated backend tests after audit | Deferred until the schema and staging project can be inspected. A mock or source-text test would not prove RLS, persistence, backup, or restore behavior. | **High blocker** |
+
+**Safety state:** No authenticated database connection was made; no production migration or write was run, and no production data or Storage object was changed or deleted. Continue only after a separate staging project and secure read-only project access are made available through an approved local credential mechanism; do not send secrets in chat.
