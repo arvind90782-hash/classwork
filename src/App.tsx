@@ -572,19 +572,55 @@ function getAuthErrorMessage(error: unknown, fallback = 'Could not complete auth
     if (error.code === 'functions/not-found') {
       return 'Account setup is unavailable because the Firebase provisioning service has not been deployed.'
     }
+    if (error.code === 'functions/internal') {
+      return 'Account setup failed on the server. The Classwork administrator needs to check the Firebase Functions deployment and its server-side configuration.'
+    }
+    if (error.code === 'functions/unavailable' || error.code === 'functions/deadline-exceeded') {
+      return 'The account service is temporarily unavailable. Please try again in a moment.'
+    }
     if (error.code === 'functions/unauthenticated' || error.code === 'functions/permission-denied') {
       return 'Firebase App Check rejected this request. The site key must be registered for this app and domain.'
     }
     if (error.code === 'functions/failed-precondition') {
-      return error.message
+      return readableAuthError(error.message, 'This account is not ready yet. Verify your email and try again.')
     }
-    return error.message
+    if (error.code === 'auth/email-already-in-use' || error.code === 'functions/already-exists') {
+      return 'An account already exists for this email. Sign in instead.'
+    }
+    if (error.code === 'auth/invalid-email' || error.code === 'functions/invalid-argument') {
+      return 'Enter a valid email address and a password with at least 6 characters.'
+    }
+    if (error.code === 'auth/weak-password') {
+      return 'Choose a stronger password with at least 6 characters.'
+    }
+    if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+      return 'The email or password is incorrect.'
+    }
+    if (error.code === 'auth/operation-not-allowed') {
+      return 'Email and password sign-in is not enabled for this Firebase project.'
+    }
+    if (error.code === 'auth/network-request-failed') {
+      return 'Network request failed. Check your connection and try again.'
+    }
+    if (error.code === 'auth/too-many-requests') {
+      return 'Too many attempts. Wait a little while before trying again.'
+    }
+    return fallback
   }
-  if (error instanceof Error) return error.message
+  if (error instanceof Error) {
+    return readableAuthError(error.message, 'The account service returned an internal error. Please try again later.')
+  }
   if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
-    return error.message
+    return readableAuthError(error.message, 'The account service returned an internal error. Please try again later.')
   }
   return fallback
+}
+
+function readableAuthError(message: string, fallback: string) {
+  const cleanedMessage = message.trim()
+  return /^(?:internal|unknown|error)(?:\s*\[\d+\])?$/i.test(cleanedMessage)
+    ? fallback
+    : cleanedMessage || fallback
 }
 
 function VerifyEmailScreen({ user, showToast, onVerified, onLogout }: {
