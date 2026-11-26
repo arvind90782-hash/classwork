@@ -12,11 +12,15 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.119.2",
     "browser-image-compression": "^2.0.2",
+    "firebase": "^13.4.0",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.77.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "recharts": "^3.11.0"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.7"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.5",
