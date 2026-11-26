@@ -8,6 +8,9 @@ import {
 } from 'lucide-react'
 import { jsPDF } from 'jspdf'
 import imageCompression from 'browser-image-compression'
+import { onAuthStateChanged, reload, sendEmailVerification, signInWithEmailAndPassword, signOut as firebaseSignOut } from 'firebase/auth'
+import type { User } from 'firebase/auth'
+import { activateVerifiedFirebaseAccount, firebaseAuth, isFirebaseConfigured, missingFirebaseConfiguration, provisionFirebaseAccount } from './lib/firebase'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { createPagesPdfBlob, downloadPagesPdf, fetchClassDocuments, fetchCuratedPages, fetchPdfArchives, fetchWorkSubmissions } from './lib/work'
 import type { ClassDocument, CuratedPage, PdfArchive, WorkSubmission } from './lib/work'
@@ -102,7 +105,9 @@ function App() {
   const [page, setPage] = useState<PageName>(() => pageFromPath(window.location.pathname))
   const [mobileMenu, setMobileMenu] = useState(false)
   const [selectedDate, setSelectedDate] = useState(todayKolkata())
-  const [session, setSession] = useState<any>(null)
+  const [user, setUser] = useState<User | null>(null)
+  const [authReady, setAuthReady] = useState(false)
+  const [emailVerified, setEmailVerified] = useState(false)
   const [authMode, setAuthMode] = useState<'signin' | 'join'>('signin')
   const [authLoading, setAuthLoading] = useState(false)
   const [tasks, setTasks] = useState<TaskRow[]>([])
@@ -111,14 +116,13 @@ function App() {
   const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
-  const [profileRefreshVersion, setProfileRefreshVersion] = useState(0)
   const loadRequestId = useRef(0)
 
   const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
     setToast({ text, type })
     window.setTimeout(() => setToast(null), 3500)
   }, [])
-  const userId = session?.user.id
+  const userId = emailVerified ? user?.uid : undefined
 
   const loadData = useCallback(async () => {
     const client = supabase
@@ -135,10 +139,9 @@ function App() {
         const { data: preference } = await client
           .from('user_preferences').select('theme,accessibility_reduced_motion').eq('user_id', userId).maybeSingle()
         if (preference) {
-          const resolvedTheme = preference.theme === 'system'
-            ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-            : preference.theme
-          document.documentElement.dataset.theme = resolvedTheme
+          // Keep the academic workspace light regardless of OS theme or a
+          // stale dark preference saved by an earlier version of the app.
+          document.documentElement.dataset.theme = 'light'
           document.documentElement.style.scrollBehavior = preference.accessibility_reduced_motion ? 'auto' : 'smooth'
         }
       }
@@ -164,22 +167,46 @@ function App() {
   }, [userId, selectedDate, showToast])
 
   useEffect(() => {
+    const auth = firebaseAuth
     const client = supabase
-    if (!client) return
-    client.auth.getSession().then(({ data }) => setSession(data.session))
-    const { data: { subscription } } = client.auth.onAuthStateChange((event, nextSession) => {
-      setSession(nextSession)
-      if (event === 'SIGNED_IN' && nextSession) {
-        // Keep the audit event to the authentication action; do not record
-        // browsing routes, browser fingerprints, or session tokens.
-        void client.rpc('log_activity', {
-          p_action: 'signed_in',
-          p_entity_type: 'authentication',
-        })
+    if (!auth || !client) return
+    let initialStateReceived = false
+    const unsubscribe = onAuthStateChanged(auth, nextUser => {
+      const isInitialState = !initialStateReceived
+      initialStateReceived = true
+      setUser(nextUser)
+      setStudent(null)
+      setTasks([])
+      if (!nextUser || !nextUser.emailVerified) {
+        setEmailVerified(false)
+        setAuthReady(true)
+        return
       }
+
+      setAuthReady(false)
+      void (async () => {
+        try {
+          await nextUser.getIdToken(true)
+          await activateVerifiedFirebaseAccount()
+          await nextUser.getIdToken(true)
+          setEmailVerified(true)
+          setAuthReady(true)
+          if (!isInitialState) {
+            // Record the authentication action without browsing or device details.
+            void client.rpc('log_activity', {
+              p_action: 'signed_in',
+              p_entity_type: 'authentication',
+            })
+          }
+        } catch (error) {
+          setEmailVerified(false)
+          setAuthReady(true)
+          showToast(error instanceof Error ? error.message : 'Could not activate verified Firebase access.', 'error')
+        }
+      })()
     })
-    return () => subscription.unsubscribe()
-  }, [])
+    return unsubscribe
+  }, [showToast])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -192,14 +219,14 @@ function App() {
 
   useEffect(() => {
     void loadData()
-  }, [loadData, profileRefreshVersion])
+  }, [loadData])
 
   async function signOut() {
     try {
-      // Sign-out must not depend on the optional audit write succeeding.
-      const { error } = await supabase!.auth.signOut()
-      if (error) throw error
-      setSession(null)
+      if (!firebaseAuth) throw new Error('Firebase is not configured.')
+      await firebaseSignOut(firebaseAuth)
+      setUser(null)
+      setEmailVerified(false)
       setStudent(null)
       setPendingCount(0)
       setNotificationsOpen(false)
@@ -270,14 +297,23 @@ function App() {
     if (isOwner) void refreshPendingCount()
   }, [isOwner, refreshPendingCount, studentId])
 
-  if (!isSupabaseConfigured) {
-    return <SetupScreen />
+  if (!isSupabaseConfigured || !isFirebaseConfigured) {
+    return <SetupScreen
+      missingSupabase={!isSupabaseConfigured}
+      missingFirebase={missingFirebaseConfiguration}
+    />
   }
-  if (!session) {
-    return <AuthScreen mode={authMode} setMode={setAuthMode} loading={authLoading} setLoading={setAuthLoading} showToast={showToast} onJoined={() => setProfileRefreshVersion(value => value + 1)} />
+  if (!authReady) {
+    return <Loading />
   }
-  if (session && !student) {
-    return <JoinScreen session={session} onJoined={loadData} showToast={showToast} onLogout={signOut} />
+  if (!user) {
+    return <AuthScreen mode={authMode} setMode={setAuthMode} loading={authLoading} setLoading={setAuthLoading} showToast={showToast} />
+  }
+  if (!emailVerified) {
+    return <VerifyEmailScreen user={user} showToast={showToast} onVerified={() => { setEmailVerified(true); setAuthReady(true) }} onLogout={signOut} />
+  }
+  if (user && !student) {
+    return <JoinScreen onJoined={loadData} showToast={showToast} onLogout={signOut} />
   }
   if (student && student.status === 'pending') {
     return <PendingScreen student={student} onLogout={signOut} />
@@ -313,7 +349,7 @@ function App() {
           })}
         </nav>
         <div className="sidebar-footer">
-          <div className="profile-avatar">{(student?.display_name || session.user.email || 'S').slice(0, 1).toUpperCase()}</div>
+          <div className="profile-avatar">{(student?.display_name || user.email || 'S').slice(0, 1).toUpperCase()}</div>
           <div className="profile-copy"><strong>{student?.display_name || 'Student'}</strong><span>{student?.roll_number ? `Roll No. ${student.roll_number}` : 'Pending setup'}</span></div>
           <button className="icon-button" onClick={signOut} aria-label="Log out"><LogOut size={17} /></button>
         </div>
@@ -375,52 +411,66 @@ function changeDate(value: string, amount: number, setter: (value: string) => vo
   setter(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date).replaceAll('/', '-'))
 }
 
-function SetupScreen() {
+function SetupScreen({ missingSupabase, missingFirebase }: {
+  missingSupabase: boolean
+  missingFirebase: string[]
+}) {
   return (
     <div className="setup-screen">
       <div className="setup-card">
         <div className="brand-mark large"><BookOpen size={28} /></div>
         <h1>Classwork needs configuration</h1>
-        <p>This deployment is missing its public Supabase configuration. Authentication, uploads and PDFs are unavailable until it is set.</p>
+        <p>Sign-in, uploads and PDFs are unavailable until the missing configuration is added to this deployment and it is rebuilt.</p>
         <ol>
-          <li>In Vercel, open <strong>Project Settings → Environment Variables</strong>.</li>
-          <li>Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> for Production.</li>
-          <li>Redeploy after saving the variables. For local development, set them in <code>.env.local</code> and restart Vite.</li>
-          <li>Confirm the database migration and class setup in the Supabase project.</li>
+          {missingSupabase && <li>Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code>.</li>}
+          {missingFirebase.length > 0 && (
+            <li>
+              Add these Firebase web app settings from Firebase Console → Project settings → General → Your apps:
+              <ul>{missingFirebase.filter(name => name !== 'VITE_FIREBASE_APPCHECK_SITE_KEY').map(name => <li key={name}><code>{name}</code></li>)}</ul>
+              {missingFirebase.includes('VITE_FIREBASE_PROJECT_ID') && <span>The Project ID must exactly match <code>classwork-ec166</code>.</span>}
+              {missingFirebase.includes('VITE_FIREBASE_APPCHECK_SITE_KEY') && (
+                <span>Register reCAPTCHA v3 for this deployment in Firebase App Check and add <code>VITE_FIREBASE_APPCHECK_SITE_KEY</code> (the site key, not the website URL).</span>
+              )}
+            </li>
+          )}
+          <li>For Vercel, add these as environment variables and redeploy. Locally, use <code>.env.local</code> and restart Vite.</li>
         </ol>
-        <div className="setup-callout"><ShieldCheck size={18} /><span>Use only the Supabase publishable key in frontend variables. Never add a service-role key to Vercel frontend settings.</span></div>
+        <div className="setup-callout"><ShieldCheck size={18} /><span>Only public Firebase web config and the Supabase publishable key belong in frontend variables. Never expose the Supabase service-role key.</span></div>
       </div>
     </div>
   )
 }
 
-function AuthScreen({ mode, setMode, loading, setLoading, showToast, onJoined }: any) {
+type AuthScreenProps = {
+  mode: 'signin' | 'join'
+  setMode: (mode: 'signin' | 'join') => void
+  loading: boolean
+  setLoading: (loading: boolean) => void
+  showToast: (text: string, type?: 'success' | 'error') => void
+}
+
+function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScreenProps) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [name, setName] = useState('')
-  const [roll, setRoll] = useState('')
-  const [invite, setInvite] = useState('')
 
   async function submitAuth(e: FormEvent) {
     e.preventDefault()
     setLoading(true)
     try {
+      const auth = firebaseAuth
+      if (!auth) throw new Error('Firebase is not configured.')
       if (mode === 'signin') {
-        const { error } = await supabase!.auth.signInWithPassword({ email, password })
-        if (error) throw error
-      } else {
-        const { data, error } = await supabase!.auth.signUp({ email, password })
-        if (error) throw error
-        if (data.user && data.session) {
-          const { error: joinError } = await supabase!.rpc('join_class', {
-            invite_code: invite, student_name: name, student_roll: roll
-          })
-          if (joinError) throw joinError
-          showToast('Registration submitted for owner approval.')
-          onJoined?.()
-        } else if (data.user) {
-          showToast('Account created. Confirm the email, then sign in and join the class.')
+        const { user: signedInUser } = await signInWithEmailAndPassword(auth, email.trim(), password)
+        if (!signedInUser.emailVerified) {
+          showToast('Verify your email address before accessing the class.', 'error')
         }
+      } else {
+        await provisionFirebaseAccount(email.trim(), password)
+        const newUser = firebaseAuth?.currentUser
+        if (!newUser) throw new Error('Firebase account was created but could not be signed in.')
+        await sendEmailVerification(newUser)
+        showToast('Account created. Verify your email to continue to your class request.')
+        setMode('signin')
       }
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not complete authentication.', 'error')
@@ -442,19 +492,69 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast, onJoined }:
             <button type="button" className={mode === 'join' ? 'active' : ''} onClick={() => setMode('join')}>Join class</button>
           </div>
           <h2>{mode === 'signin' ? 'Welcome back' : 'Join the private class'}</h2>
-          <p>{mode === 'signin' ? 'Sign in to continue to your notebook.' : 'Registration requires owner approval.'}</p>
-          {mode === 'join' && <>
-            <label>Display name<input value={name} onChange={e => setName(e.target.value)} required placeholder="Your name" /></label>
-            <label>Roll number<input value={roll} onChange={e => setRoll(e.target.value)} required placeholder="e.g. 18" /></label>
-            <label>Invite code<input value={invite} onChange={e => setInvite(e.target.value)} required placeholder="Enter class invite code" /></label>
-          </>}
+          <p>{mode === 'signin' ? 'Sign in to continue to your notebook.' : 'Create a Firebase account, verify your email, then request owner approval to join.'}</p>
           <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@example.com" /></label>
           <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={6} placeholder="At least 6 characters" /></label>
-          <button className="primary-button" disabled={loading}>{loading ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Request access'}</button>
+          <button className="primary-button" disabled={loading}>{loading ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}</button>
           <small><ShieldCheck size={14} /> Private workspace · Class 5 only</small>
           <p className="settings-note">Classwork is an independent student-maintained project. It is not an official Kendriya Vidyalaya website and is not endorsed by the school.</p>
         </form>
       </section>
+    </div>
+  )
+}
+
+function VerifyEmailScreen({ user, showToast, onVerified, onLogout }: {
+  user: User
+  showToast: (text: string, type?: 'success' | 'error') => void
+  onVerified: () => void
+  onLogout: () => void
+}) {
+  const [loading, setLoading] = useState(false)
+
+  async function resendVerification() {
+    setLoading(true)
+    try {
+      await sendEmailVerification(user)
+      showToast('Verification email sent.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not send a verification email.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function refreshVerification() {
+    setLoading(true)
+    try {
+      await reload(user)
+      if (!user.emailVerified) {
+        showToast('Your email is not verified yet.', 'error')
+        return
+      }
+      await user.getIdToken(true)
+      await activateVerifiedFirebaseAccount()
+      await user.getIdToken(true)
+      onVerified()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not check email verification.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="pending-screen">
+      <div className="pending-card">
+        <div className="brand-mark large"><ShieldCheck size={28} /></div>
+        <h1>Verify your email</h1>
+        <p>{user.emailVerified
+          ? 'Your email is verified. Refresh to finish enabling your class access.'
+          : `Open the verification link sent to ${user.email}. Class access stays locked until Firebase confirms your email.`}</p>
+        <button className="primary-button" disabled={loading} onClick={() => void refreshVerification()}>{loading ? 'Checking…' : 'I have verified my email'}</button>
+        {!user.emailVerified && <button className="secondary-button" disabled={loading} onClick={() => void resendVerification()}>Resend verification email</button>}
+        <button className="secondary-button" style={{ width: '100%', marginTop: 10 }} onClick={onLogout}>Sign out</button>
+      </div>
     </div>
   )
 }
@@ -2027,7 +2127,6 @@ function SettingsSkeleton() {
 }
 
 function SettingsView({ student, showToast }: { student: any; showToast: (text: string, type?: 'success' | 'error') => void }) {
-  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system')
   const [defaultSubjectId, setDefaultSubjectId] = useState('')
   const [subjects, setSubjects] = useState<Array<{ id: string; name: string }>>([])
   const [notificationsEnabled, setNotificationsEnabled] = useState(true)
@@ -2048,7 +2147,6 @@ function SettingsView({ student, showToast }: { student: any; showToast: (text: 
         ])
         setSubjects(subjectRows || [])
         if (preference) {
-          setTheme(preference.theme)
           setDefaultSubjectId(preference.default_subject_id || '')
           setNotificationsEnabled(preference.notifications_enabled)
           setEmailNotifications(preference.email_notifications)
@@ -2063,12 +2161,9 @@ function SettingsView({ student, showToast }: { student: any; showToast: (text: 
   }, [student?.id, student?.class_id])
 
   useEffect(() => {
-    const resolvedTheme = theme === 'system'
-      ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-      : theme
-    document.documentElement.dataset.theme = resolvedTheme
+    document.documentElement.dataset.theme = 'light'
     document.documentElement.style.scrollBehavior = reducedMotion ? 'auto' : 'smooth'
-  }, [theme, reducedMotion])
+  }, [reducedMotion])
 
   async function savePreferences() {
     if (!supabase || !student?.id) return
@@ -2076,7 +2171,7 @@ function SettingsView({ student, showToast }: { student: any; showToast: (text: 
     try {
       const { error } = await supabase.from('user_preferences').upsert({
         user_id: student.id,
-        theme,
+        theme: 'light',
         default_subject_id: defaultSubjectId || null,
         notifications_enabled: notificationsEnabled,
         email_notifications: emailNotifications,
@@ -2089,7 +2184,7 @@ function SettingsView({ student, showToast }: { student: any; showToast: (text: 
       await supabase.rpc('log_activity', {
         p_action: 'updated_personal_preferences',
         p_entity_type: 'user_preferences',
-        p_metadata: { theme, default_subject_id: defaultSubjectId || null, notifications_enabled: notificationsEnabled, compact_view: compactView, language },
+        p_metadata: { theme: 'light', default_subject_id: defaultSubjectId || null, notifications_enabled: notificationsEnabled, compact_view: compactView, language },
       })
       showToast('Personal settings saved.')
     } catch (error) {
@@ -2112,13 +2207,7 @@ function SettingsView({ student, showToast }: { student: any; showToast: (text: 
         <div className="settings-note"><ShieldCheck size={17} /><span>Name and roll number can only be changed by the class owner.</span></div>
         <h2 className="settings-section-title">Personal preferences</h2>
         <div className="form-row">
-          <label>Theme
-            <select value={theme} onChange={event => setTheme(event.target.value as 'light' | 'dark' | 'system')}>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-              <option value="system">System</option>
-            </select>
-          </label>
+          <label>Theme<div className="preference-value">Light · clean white workspace</div></label>
           <label>Default subject
             <select value={defaultSubjectId} onChange={event => setDefaultSubjectId(event.target.value)}>
               <option value="">Last used / no preference</option>
