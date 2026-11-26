@@ -11,7 +11,7 @@ import imageCompression from 'browser-image-compression'
 import { FirebaseError } from 'firebase/app'
 import { onAuthStateChanged, reload, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signOut as firebaseSignOut } from 'firebase/auth'
 import type { User } from 'firebase/auth'
-import { activateVerifiedFirebaseAccount, firebaseAuth, isFirebaseConfigured, missingFirebaseConfiguration, provisionFirebaseAccount } from './lib/firebase'
+import { activateVerifiedFirebaseAccount, firebaseAuth, isFirebaseConfigured, missingFirebaseConfiguration, provisionFirebaseAccount, withRequestTimeout } from './lib/firebase'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { createPagesPdfBlob, downloadPagesPdf, fetchClassDocuments, fetchCuratedPages, fetchPdfArchives, fetchWorkSubmissions } from './lib/work'
 import type { ClassDocument, CuratedPage, PdfArchive, WorkSubmission } from './lib/work'
@@ -187,9 +187,9 @@ function App() {
       setAuthReady(false)
       void (async () => {
         try {
-          await nextUser.getIdToken(true)
+          await withRequestTimeout(nextUser.getIdToken(true), 'Firebase token refresh')
           await activateVerifiedFirebaseAccount()
-          await nextUser.getIdToken(true)
+          await withRequestTimeout(nextUser.getIdToken(true), 'Firebase token refresh')
           setEmailVerified(true)
           setAuthReady(true)
           if (!isInitialState) {
@@ -202,7 +202,7 @@ function App() {
         } catch (error) {
           setEmailVerified(false)
           setAuthReady(true)
-          showToast(error instanceof Error ? error.message : 'Could not activate verified Firebase access.', 'error')
+          showToast(getAuthErrorMessage(error), 'error')
         }
       })()
     })
@@ -462,7 +462,10 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
       const auth = firebaseAuth
       if (!auth) throw new Error('Firebase is not configured.')
       if (mode === 'signin') {
-        const { user: signedInUser } = await signInWithEmailAndPassword(auth, email.trim(), password)
+        const { user: signedInUser } = await withRequestTimeout(
+          signInWithEmailAndPassword(auth, email.trim(), password),
+          'Sign-in',
+        )
         if (!signedInUser.emailVerified) {
           showToast('Verify your email address before accessing the class.', 'error')
         }
@@ -470,7 +473,7 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
         await provisionFirebaseAccount(email.trim(), password)
         const newUser = firebaseAuth?.currentUser
         if (!newUser) throw new Error('Firebase account was created but could not be signed in.')
-        await sendEmailVerification(newUser)
+        await withRequestTimeout(sendEmailVerification(newUser), 'Verification email request')
         showToast('Account created. Verify your email to continue to your class request.')
         setMode('signin')
       }
@@ -493,7 +496,7 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
     }
     setLoading(true)
     try {
-      await sendPasswordResetEmail(auth, email.trim())
+      await withRequestTimeout(sendPasswordResetEmail(auth, email.trim()), 'Password reset request')
       showToast('Password reset email sent. Check your inbox.')
     } catch (error) {
       showToast(getAuthErrorMessage(error), 'error')
@@ -549,7 +552,7 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
   )
 }
 
-function getAuthErrorMessage(error: unknown) {
+function getAuthErrorMessage(error: unknown, fallback = 'Could not complete authentication.') {
   if (error instanceof FirebaseError) {
     if (error.code.startsWith('appCheck/')) {
       return 'Firebase App Check rejected this request. Confirm the registered reCAPTCHA v3 key and allowed domain in Firebase.'
@@ -565,7 +568,11 @@ function getAuthErrorMessage(error: unknown) {
     }
     return error.message
   }
-  return error instanceof Error ? error.message : 'Could not complete authentication.'
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    return error.message
+  }
+  return fallback
 }
 
 function VerifyEmailScreen({ user, showToast, onVerified, onLogout }: {
@@ -579,10 +586,10 @@ function VerifyEmailScreen({ user, showToast, onVerified, onLogout }: {
   async function resendVerification() {
     setLoading(true)
     try {
-      await sendEmailVerification(user)
+      await withRequestTimeout(sendEmailVerification(user), 'Verification email request')
       showToast('Verification email sent.')
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not send a verification email.', 'error')
+      showToast(getAuthErrorMessage(error), 'error')
     } finally {
       setLoading(false)
     }
@@ -591,17 +598,17 @@ function VerifyEmailScreen({ user, showToast, onVerified, onLogout }: {
   async function refreshVerification() {
     setLoading(true)
     try {
-      await reload(user)
+      await withRequestTimeout(reload(user), 'Email verification check')
       if (!user.emailVerified) {
         showToast('Your email is not verified yet.', 'error')
         return
       }
-      await user.getIdToken(true)
+      await withRequestTimeout(user.getIdToken(true), 'Firebase token refresh')
       await activateVerifiedFirebaseAccount()
-      await user.getIdToken(true)
+      await withRequestTimeout(user.getIdToken(true), 'Firebase token refresh')
       onVerified()
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not check email verification.', 'error')
+      showToast(getAuthErrorMessage(error), 'error')
     } finally {
       setLoading(false)
     }
@@ -659,16 +666,20 @@ function JoinScreen({ onJoined, showToast, onLogout }: any) {
     e.preventDefault()
     setLoading(true)
     try {
-      const { error } = await supabase!.rpc('join_class', {
-        invite_code: invite,
-        student_name: name,
-        student_roll: roll,
-      })
+      if (!supabase) throw new Error('Supabase is not configured.')
+      const { error } = await withRequestTimeout(
+        Promise.resolve(supabase.rpc('join_class', {
+          invite_code: invite,
+          student_name: name,
+          student_roll: roll,
+        })),
+        'Class join request',
+      )
       if (error) throw error
       showToast('Class registration saved.')
-      await onJoined()
+      await withRequestTimeout(Promise.resolve(onJoined()), 'Loading your class profile')
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not submit your class request.', 'error')
+      showToast(getAuthErrorMessage(error, 'Could not submit your class request.'), 'error')
     } finally {
       setLoading(false)
     }

@@ -28,6 +28,20 @@ export const missingFirebaseConfiguration = Object.entries(requiredConfiguration
 const configured = missingFirebaseConfiguration.length === 0
 const app = configured ? initializeApp({ apiKey, authDomain, projectId, appId }) : null
 
+export function withRequestTimeout<T>(request: Promise<T>, action: string) {
+  let timeoutId: number | undefined
+  const timeout = new Promise<T>((_, reject) => {
+    timeoutId = window.setTimeout(
+      () => reject(new Error(`${action} timed out. Check your connection and try again.`)),
+      20_000,
+    )
+  })
+
+  return Promise.race([request, timeout]).finally(() => {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId)
+  })
+}
+
 if (app && appCheckSiteKey) {
   initializeAppCheck(app, {
     provider: new ReCaptchaV3Provider(appCheckSiteKey),
@@ -44,9 +58,10 @@ export async function provisionFirebaseAccount(email: string, password: string) 
   const provision = httpsCallable<{ email: string; password: string }, { customToken: string }>(
     firebaseFunctions,
     'provisionFirebaseAccount',
+    { timeout: 20_000 },
   )
-  const { data } = await provision({ email, password })
-  await signInWithCustomToken(firebaseAuth, data.customToken)
+  const { data } = await withRequestTimeout(provision({ email, password }), 'Account setup')
+  await withRequestTimeout(signInWithCustomToken(firebaseAuth, data.customToken), 'Firebase sign-in')
 }
 
 export async function activateVerifiedFirebaseAccount() {
@@ -54,6 +69,7 @@ export async function activateVerifiedFirebaseAccount() {
   const activate = httpsCallable<Record<string, never>, { authenticated: boolean }>(
     firebaseFunctions,
     'activateFirebaseAccount',
+    { timeout: 20_000 },
   )
-  await activate({})
+  await withRequestTimeout(activate({}), 'Account activation')
 }
