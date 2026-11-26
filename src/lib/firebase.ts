@@ -8,6 +8,7 @@ const authDomain = import.meta.env.VITE_FIREBASE_AUTH_DOMAIN
 const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID
 const appId = import.meta.env.VITE_FIREBASE_APP_ID
 const appCheckSiteKey = import.meta.env.VITE_FIREBASE_APPCHECK_SITE_KEY
+const authRequestTimeoutMs = 12_000
 
 const requiredConfiguration: Record<string, boolean> = {
   VITE_FIREBASE_API_KEY: Boolean(apiKey && /^AIza[0-9A-Za-z_-]{30,}$/.test(apiKey)),
@@ -33,7 +34,7 @@ export function withRequestTimeout<T>(request: Promise<T>, action: string) {
   const timeout = new Promise<T>((_, reject) => {
     timeoutId = window.setTimeout(
       () => reject(new Error(`${action} timed out. Check your connection and try again.`)),
-      20_000,
+      authRequestTimeoutMs,
     )
   })
 
@@ -58,7 +59,7 @@ export async function provisionFirebaseAccount(email: string, password: string) 
   const provision = httpsCallable<{ email: string; password: string }, { customToken: string }>(
     firebaseFunctions,
     'provisionFirebaseAccount',
-    { timeout: 20_000 },
+    { timeout: authRequestTimeoutMs },
   )
   const { data } = await withRequestTimeout(provision({ email, password }), 'Account setup')
   await withRequestTimeout(signInWithCustomToken(firebaseAuth, data.customToken), 'Firebase sign-in')
@@ -69,7 +70,7 @@ export async function activateVerifiedFirebaseAccount() {
   const activate = httpsCallable<Record<string, never>, { authenticated: boolean }>(
     firebaseFunctions,
     'activateFirebaseAccount',
-    { timeout: 20_000 },
+    { timeout: authRequestTimeoutMs },
   )
   await withRequestTimeout(activate({}), 'Account activation')
 }

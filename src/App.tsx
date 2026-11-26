@@ -454,9 +454,11 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [requestError, setRequestError] = useState<string | null>(null)
 
   async function submitAuth(e: FormEvent) {
     e.preventDefault()
+    setRequestError(null)
     setLoading(true)
     try {
       const auth = firebaseAuth
@@ -478,20 +480,27 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
         setMode('signin')
       }
     } catch (error) {
-      showToast(getAuthErrorMessage(error), 'error')
+      const message = getAuthErrorMessage(error)
+      setRequestError(message)
+      showToast(message, 'error')
     } finally {
       setLoading(false)
     }
   }
 
   async function resetPassword() {
+    setRequestError(null)
     const auth = firebaseAuth
     if (!auth) {
-      showToast('Firebase is not configured.', 'error')
+      const message = 'Firebase is not configured.'
+      setRequestError(message)
+      showToast(message, 'error')
       return
     }
     if (!email.trim()) {
-      showToast('Enter your email address first.', 'error')
+      const message = 'Enter your email address first.'
+      setRequestError(message)
+      showToast(message, 'error')
       return
     }
     setLoading(true)
@@ -499,7 +508,9 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
       await withRequestTimeout(sendPasswordResetEmail(auth, email.trim()), 'Password reset request')
       showToast('Password reset email sent. Check your inbox.')
     } catch (error) {
-      showToast(getAuthErrorMessage(error), 'error')
+      const message = getAuthErrorMessage(error)
+      setRequestError(message)
+      showToast(message, 'error')
     } finally {
       setLoading(false)
     }
@@ -514,19 +525,19 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
       <section className="auth-form-section">
         <form className="auth-form" onSubmit={submitAuth}>
           <div className="auth-tabs">
-            <button type="button" className={mode === 'signin' ? 'active' : ''} onClick={() => setMode('signin')}>Sign in</button>
-            <button type="button" className={mode === 'join' ? 'active' : ''} onClick={() => setMode('join')}>Sign up</button>
+            <button type="button" className={mode === 'signin' ? 'active' : ''} onClick={() => { setRequestError(null); setMode('signin') }}>Sign in</button>
+            <button type="button" className={mode === 'join' ? 'active' : ''} onClick={() => { setRequestError(null); setMode('join') }}>Sign up</button>
           </div>
           <h2>{mode === 'signin' ? 'Welcome back' : 'Join the private class'}</h2>
           <p>{mode === 'signin' ? 'Sign in to continue to your notebook.' : 'Create a Firebase account, verify your email, then request owner approval to join.'}</p>
-          <label>Email address<input type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@example.com" /></label>
+          <label>Email address<input type="email" autoComplete="email" value={email} onChange={e => { setEmail(e.target.value); setRequestError(null) }} required placeholder="you@example.com" /></label>
           <label>Password
             <span className="password-field">
               <input
                 type={showPassword ? 'text' : 'password'}
                 autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
                 value={password}
-                onChange={e => setPassword(e.target.value)}
+                onChange={e => { setPassword(e.target.value); setRequestError(null) }}
                 required
                 minLength={6}
                 placeholder="At least 6 characters"
@@ -543,7 +554,8 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
             </span>
           </label>
           {mode === 'signin' && <button type="button" className="auth-link" disabled={loading} onClick={() => void resetPassword()}>Forgot password?</button>}
-          <button className="primary-button" disabled={loading}>{loading ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}</button>
+          {requestError && <p className="auth-error" role="alert">{requestError}</p>}
+          <button className="primary-button" disabled={loading}>{loading ? mode === 'signin' ? 'Signing in…' : 'Creating account…' : mode === 'signin' ? 'Sign in' : 'Create account'}</button>
           <small><ShieldCheck size={14} /> Private workspace · Class 5 only</small>
           <p className="settings-note">Classwork is an independent student-maintained project. It is not an official Kendriya Vidyalaya website and is not endorsed by the school.</p>
         </form>
@@ -661,9 +673,11 @@ function JoinScreen({ onJoined, showToast, onLogout }: any) {
   const [roll, setRoll] = useState('')
   const [invite, setInvite] = useState('')
   const [loading, setLoading] = useState(false)
+  const [requestError, setRequestError] = useState<string | null>(null)
 
   async function join(e: FormEvent) {
     e.preventDefault()
+    setRequestError(null)
     setLoading(true)
     try {
       if (!supabase) throw new Error('Supabase is not configured.')
@@ -679,7 +693,9 @@ function JoinScreen({ onJoined, showToast, onLogout }: any) {
       showToast('Class registration saved.')
       await withRequestTimeout(Promise.resolve(onJoined()), 'Loading your class profile')
     } catch (error) {
-      showToast(getAuthErrorMessage(error, 'Could not submit your class request.'), 'error')
+      const message = getAuthErrorMessage(error, 'Could not submit your class request.')
+      setRequestError(message)
+      showToast(message, 'error')
     } finally {
       setLoading(false)
     }
@@ -691,9 +707,10 @@ function JoinScreen({ onJoined, showToast, onLogout }: any) {
         <div className="brand-mark large"><ShieldCheck size={28} /></div>
         <h1>Join Class 5</h1>
         <p>Enter the private invite code and your student identity.</p>
-        <label>Display name<input value={name} onChange={e => setName(e.target.value)} required placeholder="Your name" /></label>
-        <label>Roll number<input value={roll} onChange={e => setRoll(e.target.value)} required placeholder="e.g. 18" /></label>
-        <label>Invite code<input value={invite} onChange={e => setInvite(e.target.value)} required placeholder="Private class invite code" /></label>
+        <label>Display name<input value={name} onChange={e => { setName(e.target.value); setRequestError(null) }} required placeholder="Your name" /></label>
+        <label>Roll number<input value={roll} onChange={e => { setRoll(e.target.value); setRequestError(null) }} required placeholder="e.g. 18" /></label>
+        <label>Invite code<input value={invite} onChange={e => { setInvite(e.target.value); setRequestError(null) }} required placeholder="Private class invite code" /></label>
+        {requestError && <p className="auth-error" role="alert">{requestError}</p>}
         <button className="primary-button" disabled={loading}>{loading ? 'Joining…' : 'Join class'}</button>
         <button type="button" className="secondary-button" style={{ width: '100%', marginTop: 10 }} onClick={onLogout}>Sign out</button>
       </form>
