@@ -55,6 +55,8 @@ Never expose the Supabase service-role key in frontend code or Vite variables.
 
 Sign in using the owner account, open **Admin Panel → Student approvals** (or **Member Approvals** in the sidebar), then choose **Approve** or **Decline**. New requests update the notification bell in real time; the app also refreshes the queue every 15 seconds as a fallback. Once approved, the student's pending screen refreshes automatically.
 
+Students create an account with **Sign up**, verify the email, then submit their name, roll number, and class invite code. The request should appear in **Member Approvals** with status **pending**; sign in with an existing account using **Sign in**. Use **Forgot password?** to request a Firebase password reset. Account creation requires the deployed Firebase provisioning functions, a registered App Check reCAPTCHA v3 key for the production domain, and the Firebase third-party provider plus migrations configured in Supabase.
+
 Students can upload multi-page work using the gallery picker or capture pages directly with the camera. **Class Pages** is a separate shared class library for index pages, the yearly syllabus, timetables, notices, and custom categories. Owners can review uploaded work under **All Submissions**, select pages for the curated notebook, and download the selected images as a PDF. Students can search submissions and view their own uploads under **My Contributions**.
 
 Email alerts to the owner are not configured yet. In-app notifications work without exposing an email credential in the browser; choose a trusted server-side email provider before enabling Gmail delivery.

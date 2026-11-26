@@ -3,12 +3,13 @@ import type { FormEvent } from 'react'
 import {
   Archive, Bell, BookOpen, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
   Clock3, Download, FileText, FolderOpen, Grid2X2, Home, ImagePlus,
-  LogOut, Menu, RotateCw, Search, Settings, ShieldCheck, Upload,
+  Eye, EyeOff, LogOut, Menu, RotateCw, Search, Settings, ShieldCheck, Upload,
   UserRound, Users, X, AlertTriangle
 } from 'lucide-react'
 import { jsPDF } from 'jspdf'
 import imageCompression from 'browser-image-compression'
-import { onAuthStateChanged, reload, sendEmailVerification, signInWithEmailAndPassword, signOut as firebaseSignOut } from 'firebase/auth'
+import { FirebaseError } from 'firebase/app'
+import { onAuthStateChanged, reload, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signOut as firebaseSignOut } from 'firebase/auth'
 import type { User } from 'firebase/auth'
 import { activateVerifiedFirebaseAccount, firebaseAuth, isFirebaseConfigured, missingFirebaseConfiguration, provisionFirebaseAccount } from './lib/firebase'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
@@ -452,6 +453,7 @@ type AuthScreenProps = {
 function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScreenProps) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
 
   async function submitAuth(e: FormEvent) {
     e.preventDefault()
@@ -473,7 +475,28 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
         setMode('signin')
       }
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not complete authentication.', 'error')
+      showToast(getAuthErrorMessage(error), 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function resetPassword() {
+    const auth = firebaseAuth
+    if (!auth) {
+      showToast('Firebase is not configured.', 'error')
+      return
+    }
+    if (!email.trim()) {
+      showToast('Enter your email address first.', 'error')
+      return
+    }
+    setLoading(true)
+    try {
+      await sendPasswordResetEmail(auth, email.trim())
+      showToast('Password reset email sent. Check your inbox.')
+    } catch (error) {
+      showToast(getAuthErrorMessage(error), 'error')
     } finally {
       setLoading(false)
     }
@@ -489,12 +512,34 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
         <form className="auth-form" onSubmit={submitAuth}>
           <div className="auth-tabs">
             <button type="button" className={mode === 'signin' ? 'active' : ''} onClick={() => setMode('signin')}>Sign in</button>
-            <button type="button" className={mode === 'join' ? 'active' : ''} onClick={() => setMode('join')}>Join class</button>
+            <button type="button" className={mode === 'join' ? 'active' : ''} onClick={() => setMode('join')}>Sign up</button>
           </div>
           <h2>{mode === 'signin' ? 'Welcome back' : 'Join the private class'}</h2>
           <p>{mode === 'signin' ? 'Sign in to continue to your notebook.' : 'Create a Firebase account, verify your email, then request owner approval to join.'}</p>
-          <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@example.com" /></label>
-          <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={6} placeholder="At least 6 characters" /></label>
+          <label>Email address<input type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@example.com" /></label>
+          <label>Password
+            <span className="password-field">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+                minLength={6}
+                placeholder="At least 6 characters"
+              />
+              <button
+                type="button"
+                className="password-visibility"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                aria-pressed={showPassword}
+                onClick={() => setShowPassword(value => !value)}
+              >
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </span>
+          </label>
+          {mode === 'signin' && <button type="button" className="auth-link" disabled={loading} onClick={() => void resetPassword()}>Forgot password?</button>}
           <button className="primary-button" disabled={loading}>{loading ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}</button>
           <small><ShieldCheck size={14} /> Private workspace · Class 5 only</small>
           <p className="settings-note">Classwork is an independent student-maintained project. It is not an official Kendriya Vidyalaya website and is not endorsed by the school.</p>
@@ -502,6 +547,25 @@ function AuthScreen({ mode, setMode, loading, setLoading, showToast }: AuthScree
       </section>
     </div>
   )
+}
+
+function getAuthErrorMessage(error: unknown) {
+  if (error instanceof FirebaseError) {
+    if (error.code.startsWith('appCheck/')) {
+      return 'Firebase App Check rejected this request. Confirm the registered reCAPTCHA v3 key and allowed domain in Firebase.'
+    }
+    if (error.code === 'functions/not-found') {
+      return 'Account setup is unavailable because the Firebase provisioning service has not been deployed.'
+    }
+    if (error.code === 'functions/unauthenticated' || error.code === 'functions/permission-denied') {
+      return 'Firebase App Check rejected this request. The site key must be registered for this app and domain.'
+    }
+    if (error.code === 'functions/failed-precondition') {
+      return error.message
+    }
+    return error.message
+  }
+  return error instanceof Error ? error.message : 'Could not complete authentication.'
 }
 
 function VerifyEmailScreen({ user, showToast, onVerified, onLogout }: {
